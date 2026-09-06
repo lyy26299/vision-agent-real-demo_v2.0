@@ -1886,3 +1886,681 @@ Pose + Biomechanics + MLLM
 ~~~
 
 这些对比比单纯“换一个更大的 LLM”更能说明系统架构的价值。
+
+
+---
+
+## 36. 方案 A 工程可行性复核（Reviewed）
+
+本节对“2D Pose + Personal Calibration + FSM + Realtime MLLM”方案做工程层面的二次复核。
+
+### 36.1 结论
+
+**结论：可行，建议继续推进。**
+
+但可行性的前提不是“所有模块都天然稳定”，而是满足以下四个条件：
+
+1. 能从 Pose Processor 稳定取得结构化关键点；
+2. 本机 YOLO Pose 在目标分辨率下达到可接受的实时帧率；
+3. 第一阶段把任务限制为单人、固定动作、相对固定机位；
+4. 2D Pose 只负责其真正可观测的动作特征，不把二维结果包装成精细三维生物力学结论。
+
+综合评分：
+
+| 维度 | 复核后评价 |
+|---|---|
+| 架构兼容性 | 高 |
+| 工程实现难度 | 中 |
+| 实时性潜力 | 高，但必须实测 |
+| 深蹲 Rep / Phase 检测 | 高 |
+| 粗粒度动作纠正 | 中高 |
+| 精细三维生物力学判断 | 低-中 |
+| 个体化能力 | 中高 |
+| 可解释性 | 高 |
+| 与 Memory / Reference 扩展兼容性 | 高 |
+
+**总体工程可行性：约 8 / 10。**
+
+这里的 8 / 10 不是准确率指标，而是对“当前代码基础上能否较稳妥实现”的工程判断。
+
+---
+
+### 36.2 为什么确认架构层面可行
+
+当前仓库已经具备：
+
+- LocalEdge 摄像头 / 麦克风 / 扬声器链路；
+- Qwen Realtime；
+- YOLO Pose Processor；
+- asyncio 生命周期；
+- Tkinter UI；
+- Processor 管线；
+- `SessionController`。
+
+Vision Agents 官方文档确认，Processor 用于实时分析 / 转换音视频流，并支持将分析状态提供给 LLM。官方也提供 `VideoProcessor` / `VideoProcessorPublisher` 这类扩展点。
+
+因此下面的链路与框架设计并不冲突：
+
+~~~text
+Video Track
+↓
+Custom Pose Processor
+↓
+PoseObservation
+↓
+CoachRuntime
+↓
+FSM / Arbiter
+~~~
+
+Vision Agents 0.6.x 还提供 `agent.simple_response(...)`，可以把结构化 CoachEvent 转成一个主动 LLM 响应，并经过当前 inference flow 输出。
+
+官方参考：
+
+- https://visionagents.ai/core/processors-core
+- https://visionagents.ai/core/agent-core
+- https://visionagents.ai/integrations/create-your-own-plugin
+
+---
+
+### 36.3 YOLO 结构化关键点链路可行
+
+Ultralytics 官方 Pose API 明确提供：
+
+~~~python
+result.keypoints
+result.keypoints.xy
+result.keypoints.xyn
+result.keypoints.data
+~~~
+
+其中：
+
+- `xy`：像素坐标；
+- `xyn`：归一化坐标；
+- `data`：关键点数据，可包含 confidence / visibility。
+
+因此：
+
+~~~text
+YOLO
+↓
+Keypoints
+↓
+Geometry
+↓
+PoseObservation
+~~~
+
+这条链路在 API 层面可行。
+
+官方参考：
+
+- https://docs.ultralytics.com/tasks/pose/
+
+---
+
+### 36.4 Qwen Realtime 的慢环角色可行
+
+Qwen-Omni-Realtime 官方支持：
+
+- streaming audio；
+- streaming image / video-frame input；
+- realtime text / audio response；
+- server VAD / semantic VAD。
+
+官方还明确建议视频以抽帧形式输入，典型推荐约 1 FPS。
+
+因此当前项目中：
+
+~~~text
+YOLO ~10 FPS
++
+Qwen Video ~1 FPS
+~~~
+
+这种快慢分层是合理的。
+
+Qwen 不需要承担每帧判定，只消费：
+
+- 少量视频语义上下文；
+- CoachEvent；
+- 用户语音；
+- Memory context。
+
+官方参考：
+
+- https://help.aliyun.com/en/model-studio/realtime
+
+---
+
+### 36.5 当前最大的 API 风险：版本没有完全锁死
+
+当前 `pyproject.toml` 使用：
+
+~~~text
+vision-agents[...]>=0.6.9
+~~~
+
+而仓库中没有提交 `uv.lock`。
+
+这意味着：
+
+> 两台机器执行依赖安装时，可能得到不同的小版本甚至更高版本。
+
+Vision Agents 在 0.6.x 有过 inference pipeline 和 event API 的 breaking changes，因此后续开始实现 CoachRuntime 前，建议先做：
+
+~~~text
+Step 1
+uv lock
+
+Step 2
+记录实际版本：
+uv run python -c "import vision_agents; print(...)"
+
+Step 3
+将通过测试的版本固定
+~~~
+
+更稳妥的依赖策略是：
+
+~~~text
+先开发：
+vision-agents[...] == 当前已验证版本
+
+确认兼容后：
+再决定是否放宽版本范围
+~~~
+
+**Go 条件：**
+
+- 当前实际安装版本确定；
+- `Agent.simple_response`、Processor 生命周期、自定义视频处理代码通过最小测试。
+
+---
+
+### 36.6 实时性不能只靠理论判断，必须 benchmark
+
+当前代码配置：
+
+~~~text
+Camera: 30 FPS
+YOLO Pose: 10 FPS
+Qwen Video: 1 FPS
+~~~
+
+但“YOLO 配成 10 FPS”不代表本机一定可以持续完成 10 次推理 / 秒。
+
+实际性能受：
+
+- Mac 芯片型号；
+- MPS 支持；
+- 输入分辨率；
+- YOLO 模型大小；
+- 视频转换；
+- UI rendering；
+- Python event loop 调度
+
+影响。
+
+因此必须新增实时 benchmark。
+
+建议记录：
+
+~~~python
+PoseMetrics(
+    inference_ms=...,
+    preprocess_ms=...,
+    total_frame_ms=...,
+    dropped_frames=...,
+)
+~~~
+
+第一阶段建议验收线：
+
+~~~text
+Pose processing p95 < 100~120 ms
+且
+不会阻塞 UI / audio
+~~~
+
+如果达不到，不应该立刻推翻架构，而是按顺序优化：
+
+~~~text
+降低 Pose FPS
+↓
+降低输入分辨率
+↓
+确认 MPS
+↓
+减少重复 frame copy
+↓
+再考虑更小 / 更快模型
+~~~
+
+**Go 条件：**
+
+- 实际 Pose 更新频率至少约 6–10 Hz；
+- UI 仍流畅；
+- 音频交互没有明显卡顿。
+
+---
+
+### 36.7 2D Pose 的真正能力边界
+
+方案 A 非常适合判断：
+
+- rep count；
+- movement phase；
+- tempo；
+- 明显 ROM；
+- 明显 torso lean；
+- 粗粒度左右差异；
+- tracking quality；
+- pause / partial rep。
+
+但单摄像头 2D Pose 不应该过度承诺：
+
+- 精确三维关节角；
+- 骨盆真实旋转；
+- 深度方向的细小位移；
+- 复杂膝内外旋；
+- 医疗意义的运动诊断。
+
+因此需要建立：
+
+~~~text
+Observable Feature Policy
+~~~
+
+例如：
+
+~~~text
+SIDE VIEW:
+允许高权重：
+- knee flexion
+- hip flexion trend
+- torso lean
+- rep phase
+
+降低权重：
+- frontal knee alignment
+
+FRONT VIEW:
+允许高权重：
+- left/right symmetry
+- lateral displacement
+
+降低权重：
+- sagittal squat depth
+~~~
+
+**Go 条件：**
+
+每个 form rule 都必须标记：
+
+~~~text
+required_view
+required_keypoints
+min_confidence
+~~~
+
+如果视角不满足，则输出：
+
+~~~text
+NOT_OBSERVABLE / UNKNOWN
+~~~
+
+而不是错误纠正。
+
+---
+
+### 36.8 Calibration 可行，但只能校准“基线”，不能校准“正确答案”
+
+Personal Calibration 可以学习：
+
+- standing knee baseline；
+- torso baseline；
+- body scale；
+- 左右初始差异；
+- 摄像机下的正常坐标范围。
+
+但不能采用：
+
+~~~text
+用户第一次怎么做
+=
+标准动作就是什么
+~~~
+
+必须严格分开：
+
+~~~text
+Personal Baseline
+!=
+Form Standard
+~~~
+
+例如：
+
+~~~text
+Personal Baseline:
+standing_knee = 172°
+
+Movement Observation:
+bottom reached at 125°
+
+Form Standard / Quality Rule:
+ROM may still be insufficient
+~~~
+
+所以 Calibration 主要服务：
+
+- 状态识别；
+- 相对变化；
+- 个体尺度归一化。
+
+而动作质量标准仍来自：
+
+- 明确规则；
+- reference motion；
+- 后期 biomechanics context。
+
+---
+
+### 36.9 FSM 可行性的关键不在阈值，而在时序
+
+第一版深蹲 FSM 不应该依赖单个固定角度：
+
+~~~text
+knee < 90° → BOTTOM
+~~~
+
+而应该使用组合证据：
+
+~~~text
+Personal baseline
++
+angle trend
++
+angular velocity
++
+hip displacement
++
+hysteresis
++
+minimum dwell frames
++
+confidence gate
+~~~
+
+推荐最小状态：
+
+~~~text
+UNKNOWN
+STANDING
+DESCENDING
+BOTTOM
+ASCENDING
+~~~
+
+Rep 完成必须满足完整状态链，而不是某一帧满足条件。
+
+这使得：
+
+- 半蹲；
+- 底部暂停；
+- 抖动；
+- 走出画面
+
+不容易错误触发 rep。
+
+---
+
+### 36.10 Realtime LLM 不应直接进入快环
+
+复核后仍然维持这个结论。
+
+推荐：
+
+~~~text
+Pose
+↓
+FSM
+↓
+CoachEvent
+↓
+Arbiter
+↓
+LLM
+~~~
+
+不推荐：
+
+~~~text
+Pose frame
+↓
+LLM
+↓
+FSM state
+~~~
+
+原因：
+
+- 网络 / 模型延迟不可作为 10 Hz 控制环依赖；
+- 输出不完全确定；
+- 难以重放验证；
+- 用户打断和生成响应会改变时序。
+
+LLM 可以参与：
+
+- wording；
+- user Q&A；
+- cue selection；
+- memory interpretation；
+- session summary；
+- Adaptive Config Proposal。
+
+但 FSM 实际 state transition 应保持 deterministic。
+
+---
+
+## 37. 方案 A 必须通过的阶段验收
+
+### Gate A — Pose API
+
+必须证明：
+
+~~~text
+一帧
+↓
+YOLO
+↓
+17 keypoints + confidence
+↓
+PoseObservation
+~~~
+
+连续运行稳定。
+
+**失败则：** 暂停后续 FSM 开发，先解决 Processor 数据出口。
+
+### Gate B — Realtime Performance
+
+必须证明：
+
+~~~text
+Pose pipeline >= 6–10 Hz
++
+UI 正常
++
+Realtime audio 正常
+~~~
+
+**失败则：** 优化帧率 / 分辨率 / frame copying。
+
+### Gate C — Geometry Stability
+
+静止时：
+
+- knee angle 不应剧烈跳变；
+- hip angle 不应剧烈跳变。
+
+运动时：
+
+- 曲线变化连续；
+- 遮挡时 confidence 下降并触发 UNKNOWN。
+
+### Gate D — Squat FSM
+
+固定测试视频中：
+
+- 完整 rep 正确计数；
+- partial rep 不计或明确标记；
+- bottom pause 不重复计数；
+- tracking lost 不产生 phantom rep。
+
+建议第一阶段至少建立：
+
+~~~text
+good_squat
+shallow_squat
+bottom_pause
+occlusion
+leave_frame
+different_speed
+~~~
+
+六类录像测试。
+
+### Gate E — Feedback Arbitration
+
+必须证明：
+
+~~~text
+FORM_WARNING
++
+REP_COMPLETED
++
+USER_INTERRUPT
+~~~
+
+同时出现时，不会让系统连续说三句话。
+
+### Gate F — LLM Integration
+
+必须证明：
+
+~~~text
+结构化 CoachEvent
+↓
+Qwen
+↓
+1~2句简短反馈
+~~~
+
+不会反过来修改 rep_count / FSM state。
+
+---
+
+## 38. Go / No-Go 决策
+
+### 可以继续方案 A（GO）
+
+当：
+
+- YOLO Pose 在本机达到稳定实时速度；
+- 单人关键点检测可靠；
+- 至少一个固定视角下 SquatFSM 可以稳定计数；
+- UNKNOWN / confidence gate 正常；
+- Qwen 与快环解耦。
+
+### 需要降级或调整（ADJUST）
+
+当：
+
+- 10 Hz 达不到但 5–8 Hz 可用；
+- 某些 form rule 对视角高度敏感；
+- 2D Pose 可计数但无法可靠判断某类错误。
+
+此时：
+
+- 降低 Pose FPS；
+- 限定摄像机视角；
+- 删除不可观察的 form rule；
+- 将复杂错误留到 Reference / Biomechanics 阶段。
+
+### 不建议继续当前实现方式（NO-GO）
+
+如果：
+
+- 必须依赖 MLLM 才能判断每一个 rep；
+- Pose 数据无法稳定取得；
+- 低置信度帧仍大量触发动作事件；
+- 单摄像头视角被要求承担不可观察的 3D 判断；
+- UI / audio 被 Pose 推理持续阻塞。
+
+这些情况说明实现方式需要调整，而不是说明整个 CoachRuntime 架构错误。
+
+---
+
+## 39. 复核后的推荐实施顺序
+
+最终建议顺序调整为：
+
+~~~text
+A0 依赖版本锁定
+↓
+A1 Pose API Spike
+↓
+A2 Performance Benchmark
+↓
+A3 PoseObservation
+↓
+A4 Geometry
+↓
+A5 Smoothing + Confidence Gate
+↓
+A6 Calibration
+↓
+A7 SquatFSM
+↓
+A8 Replay Test Suite
+↓
+A9 CoachEvent
+↓
+A10 FeedbackArbiter
+↓
+A11 Qwen simple_response
+↓
+A12 User Interrupt
+~~~
+
+与之前路线相比，新增两个必须提前完成的步骤：
+
+1. **A0：版本锁定**
+2. **A2：性能 benchmark**
+
+原因是这两件事最容易在后期成为隐藏的工程阻塞点。
+
+---
+
+## 40. 最终复核意见
+
+方案 A 的优势不是“最先进”，而是：
+
+> **它是目前最容易在现有仓库中构建出可靠闭环，同时又能自然升级到 Reference Motion、Biomechanics 和 Memory 的架构。**
+
+因此当前建议仍然是：
+
+~~~text
+先实现 A
+↓
+验证真实 Pose / FSM 指标
+↓
+再加入 C（Reference）
+↓
+再加入 B-lite（Biomechanics）
+~~~
+
+不要在 Pose 和 FSM 尚未通过 replay benchmark 前，提前投入完整 3D biomechanics 或 Motion-aware MLLM 微调。
