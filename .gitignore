@@ -85,3 +85,4 @@ history/
 # Local Scripts (keep in scripts/ for distribution)
 !scripts/*.sh
 !scripts/*.bat
+:memory:.ses

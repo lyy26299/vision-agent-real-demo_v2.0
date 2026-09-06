@@ -68,11 +68,7 @@ async def create_agent(**kwargs) -> Agent:
                     "DASHSCOPE_BASE_URL",
                     "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
                 ),
-
-                voice="Ethan"
             ),
-        
-           
             processors=[
                 # YOLO 姿态检测 - 实时追踪人体关键点
                 ultralytics.YOLOPoseProcessor(
