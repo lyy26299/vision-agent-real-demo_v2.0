@@ -8,11 +8,13 @@ import logging
 import os
 import ssl
 import uuid
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 import certifi
 from dotenv import load_dotenv
 
+from coach.qwen_contract import CHINA_BASE_URL, QWEN_REALTIME_MODEL
 
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 load_dotenv()
@@ -53,9 +55,7 @@ class CoachUI(Protocol):
     def append_log(self, text: str, tag: str = "normal") -> None: ...
 
 
-def make_dashboard_edge(
-    settings: SessionSettings, frame_sink: Callable[[Any], None]
-) -> Any:
+def make_dashboard_edge(settings: SessionSettings, frame_sink: Callable[[Any], None]) -> Any:
     """Create a LocalEdge that renders processed frames in the main dashboard."""
 
     import aiortc
@@ -153,11 +153,12 @@ class SessionController:
                 agent_user=User(name="AI 健身教练"),
                 instructions=session_instructions(settings),
                 llm=qwen.Realtime(
+                    model=os.getenv("QWEN_REALTIME_MODEL", QWEN_REALTIME_MODEL),
                     fps=1,
                     include_video=True,
                     base_url=os.getenv(
                         "DASHSCOPE_BASE_URL",
-                        "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+                        CHINA_BASE_URL,
                     ),
                     voice=os.getenv("QWEN_VOICE", "Ethan"),
                     vad_threshold=0.35,

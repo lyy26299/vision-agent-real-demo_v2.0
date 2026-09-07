@@ -2,11 +2,14 @@
 name = "vision-agent-real-demo"
 version = "1.0.0"
 description = "基于 Vision-Agents 的实时交互感知演示"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
-    "vision-agents[gemini,getstream,local,qwen,ultralytics]>=0.6.9",
+    # Qwen text bridging currently relies on the verified 0.6.9 adapter surface.
+    "vision-agents[gemini,getstream,local,qwen,ultralytics]==0.6.9",
     "python-dotenv>=1.0.0",
     "certifi>=2024.8.30",
+    # Direct dependency: scripts/smoke_qwen_realtime.py imports websockets.
+    "websockets==15.0.1",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +25,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["vision_agent_demo"]
+
+[tool.setuptools.packages.find]
+include = ["coach*"]
 
 [tool.vision-agents.agent]
 entrypoint = "vision_agent_demo:runner"

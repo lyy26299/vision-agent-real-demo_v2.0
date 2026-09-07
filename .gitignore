@@ -47,7 +47,8 @@ weights/
 .venv/
 venv/
 env/
-uv.lock
+# Application lockfiles are committed so the verified realtime stack is reproducible.
+!uv.lock
 
 # Logs
 *.log
