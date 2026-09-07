@@ -260,6 +260,19 @@ class MacOSVoiceProcessingBackend:
                             "channels": self.channels,
                             "voice_processing": True,
                         }
+
+                    # The native VPIO capture side is allowed to negotiate its
+                    # actual macOS sample rate. LocalEdge reads these properties
+                    # when wrapping each microphone block into PcmData, and the
+                    # Qwen adapter already resamples PcmData to its required
+                    # 16 kHz input rate.
+                    negotiated_rate = self._status.get("sample_rate")
+                    negotiated_channels = self._status.get("channels")
+                    if isinstance(negotiated_rate, (int, float)) and negotiated_rate > 0:
+                        self.sample_rate = int(negotiated_rate)
+                    if isinstance(negotiated_channels, int) and negotiated_channels > 0:
+                        self.channels = negotiated_channels
+
                     self._ready.set()
                 elif kind == _ERROR:
                     self._startup_error = payload.decode("utf-8", errors="replace")
