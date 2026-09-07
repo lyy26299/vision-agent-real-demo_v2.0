@@ -410,7 +410,7 @@ private final class VoiceProcessingBridge {
         }
 
         let byteCount = Int(frames) * MemoryLayout<Int16>.size
-        var buffer = AudioBuffer(
+        let buffer = AudioBuffer(
             mNumberChannels: channels,
             mDataByteSize: UInt32(byteCount),
             mData: captureMemory
@@ -462,7 +462,7 @@ private final class VoiceProcessingBridge {
     }
 }
 
-let bridge = VoiceProcessingBridge()
+private let bridge = VoiceProcessingBridge()
 
 do {
     try bridge.start()
