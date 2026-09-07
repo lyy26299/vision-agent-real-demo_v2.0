@@ -37,7 +37,7 @@ private func readExactly(_ count: Int) -> Data? {
     var output = Data()
     while output.count < count {
         let remaining = count - output.count
-        guard let part = try? stdinHandle.read(upToCount: remaining), let part, !part.isEmpty else {
+        guard let part = try? stdinHandle.read(upToCount: remaining), !part.isEmpty else {
             return nil
         }
         output.append(part)
