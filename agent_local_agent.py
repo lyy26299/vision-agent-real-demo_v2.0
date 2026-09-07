@@ -14,6 +14,7 @@ from typing import Any, Protocol
 import certifi
 from dotenv import load_dotenv
 
+from coach.models import PoseSnapshot
 from coach.qwen_contract import CHINA_BASE_URL, QWEN_REALTIME_MODEL
 
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
@@ -35,9 +36,6 @@ LOGGER = logging.getLogger("vision_coach")
 
 
 class SessionSettings(Protocol):
-    audio_input: Any
-    audio_output: Any
-    camera: Any
     exercise: str
     target_reps: int
 
@@ -52,37 +50,18 @@ class CoachUI(Protocol):
 
     def submit_frame(self, frame: Any) -> None: ...
 
+    def begin_pose_session(self, session_id: str) -> None: ...
+
+    def submit_pose(self, snapshot: PoseSnapshot) -> None: ...
+
     def append_log(self, text: str, tag: str = "normal") -> None: ...
 
 
 def make_dashboard_edge(settings: SessionSettings, frame_sink: Callable[[Any], None]) -> Any:
-    """Create a LocalEdge that renders processed frames in the main dashboard."""
+    """Browser owns device I/O; processed video stays in the dashboard."""
+    from coach.browser_edge import BrowserEdge
 
-    import aiortc
-    from vision_agents.plugins.local import LocalEdge
-
-    class DashboardLocalEdge(LocalEdge):
-        async def _forward_video(self, source: aiortc.MediaStreamTrack) -> None:
-            try:
-                while True:
-                    frame = await source.recv()
-                    frame_sink(frame)
-            except asyncio.CancelledError:
-                raise
-            except (aiortc.MediaStreamError, RuntimeError):
-                LOGGER.debug("本地视频流已结束")
-
-        async def open_demo_for_agent(self, *_args: Any, **_kwargs: Any) -> None:
-            return
-
-    return DashboardLocalEdge(
-        audio_input=settings.audio_input,
-        audio_output=settings.audio_output,
-        video_input=settings.camera,
-        video_width=640,
-        video_height=480,
-        video_fps=30,
-    )
+    return BrowserEdge(frame_sink=frame_sink)
 
 
 def session_instructions(settings: SessionSettings) -> str:
@@ -126,6 +105,8 @@ class SessionController:
     async def _run(self, settings: SessionSettings) -> None:
         agent = None
         processor = None
+        edge = None
+        waiters = []
         try:
             if not valid_dashscope_key():
                 raise RuntimeError("请先在 .env 中配置 DASHSCOPE_API_KEY")
@@ -134,14 +115,19 @@ class SessionController:
             LOGGER.info("正在加载 YOLO 姿态模型...")
 
             from vision_agents.core import Agent, User
-            from vision_agents.plugins import qwen, ultralytics
 
+            from coach.pose_adapter import StructuredPoseProcessor
+            from coach.qwen_duplex import DuplexQwenRealtime
+
+            call_id = f"local-{uuid.uuid4().hex[:8]}"
+            self.ui.begin_pose_session(call_id)
             processor = await asyncio.to_thread(
-                ultralytics.YOLOPoseProcessor,
+                StructuredPoseProcessor,
+                session_id=call_id,
+                snapshot_sink=self.ui.submit_pose,
                 model_path="yolo11n-pose.pt",
                 device=os.getenv("YOLO_DEVICE", "mps"),
                 fps=10,
-                max_workers=2,
             )
             if self.stop_event is None or self.stop_event.is_set():
                 return
@@ -152,7 +138,7 @@ class SessionController:
                 edge=edge,
                 agent_user=User(name="AI 健身教练"),
                 instructions=session_instructions(settings),
-                llm=qwen.Realtime(
+                llm=DuplexQwenRealtime(
                     model=os.getenv("QWEN_REALTIME_MODEL", QWEN_REALTIME_MODEL),
                     fps=1,
                     include_video=True,
@@ -166,13 +152,29 @@ class SessionController:
                 processors=[processor],
             )
 
-            call_id = f"local-{uuid.uuid4().hex[:8]}"
             call = await agent.create_call("local", call_id)
             async with agent.join(call, participant_wait_timeout=0):
+                self.ui.set_state("starting", "等待浏览器授权")
+                LOGGER.info("请打开浏览器链接并连接音视频设备：%s", edge.url)
+                await asyncio.to_thread(edge.open_demo)
+                stop_wait = asyncio.create_task(self.stop_event.wait())
+                end_wait = asyncio.create_task(edge.finished.wait())
+                ready_wait = asyncio.create_task(edge.connected.wait())
+                waiters = [stop_wait, end_wait, ready_wait]
+                done, _ = await asyncio.wait(
+                    waiters, timeout=120, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    raise RuntimeError("等待浏览器授权超时，请重新开始训练")
+                if stop_wait in done or end_wait in done:
+                    if edge.failure:
+                        raise RuntimeError(edge.failure)
+                    return
                 self.ui.set_state("running", f"{settings.exercise} · {settings.target_reps} 次")
-                LOGGER.info("训练已开始，请保持全身位于画面内并直接说话。")
-                if self.stop_event is not None:
-                    await self.stop_event.wait()
+                LOGGER.info("训练已开始：浏览器全双工 AEC，请保持全身位于画面内。")
+                await asyncio.wait([stop_wait, end_wait], return_when=asyncio.FIRST_COMPLETED)
+                if edge.failure:
+                    raise RuntimeError(edge.failure)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -180,12 +182,18 @@ class SessionController:
             self.ui.set_state("error", "启动失败")
             self.ui.append_log(str(exc), "error")
         finally:
+            for waiter in waiters:
+                waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
             if agent is not None:
                 with contextlib.suppress(Exception):
                     await agent.close()
             elif processor is not None:
                 with contextlib.suppress(Exception):
                     await processor.close()
+            if edge is not None:
+                with contextlib.suppress(Exception):
+                    await edge.close()
             if self.ui.alive and self.ui.state != "error":
                 self.ui.set_state("idle", "待命")
                 LOGGER.info("训练已停止。")

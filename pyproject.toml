@@ -10,6 +10,9 @@ dependencies = [
     "certifi>=2024.8.30",
     # Direct dependency: scripts/smoke_qwen_realtime.py imports websockets.
     "websockets==15.0.1",
+    "aiohttp==3.14.3",
+    "aiortc==1.14.0",
+    "av==16.1.0",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +31,9 @@ py-modules = ["vision_agent_demo"]
 
 [tool.setuptools.packages.find]
 include = ["coach*"]
+
+[tool.setuptools.package-data]
+coach = ["browser_media.html"]
 
 [tool.vision-agents.agent]
 entrypoint = "vision_agent_demo:runner"

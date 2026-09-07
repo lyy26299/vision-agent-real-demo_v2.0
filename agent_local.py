@@ -6,10 +6,9 @@ import asyncio
 import contextlib
 import logging
 import os
-import platform
 import queue
-import shutil
 import sys
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import font as tkfont
@@ -17,20 +16,11 @@ from tkinter import ttk
 from typing import Any
 
 from agent_local_agent import LOGGER, SessionController
-
-
-@dataclass(frozen=True)
-class DeviceCatalog:
-    audio_inputs: list[Any]
-    audio_outputs: list[Any]
-    cameras: list[Any]
+from coach.models import PoseSnapshot
 
 
 @dataclass(frozen=True)
 class SessionSettings:
-    audio_input: Any
-    audio_output: Any
-    camera: Any
     exercise: str
     target_reps: int
 
@@ -67,10 +57,13 @@ class FitnessCoachUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.alive = True
-        self.devices: DeviceCatalog | None = None
         self.actions: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.logs: queue.Queue[str] = queue.Queue(maxsize=400)
         self.frames: queue.Queue[Any] = queue.Queue(maxsize=2)
+        self.poses: queue.Queue[PoseSnapshot] = queue.Queue(maxsize=1)
+        self._pose_session_id: str | None = None
+        self._latest_pose: PoseSnapshot | None = None
+        self._pose_order = (0, 0)
         self._photo: tk.PhotoImage | None = None
         self._exercise = self.EXERCISES[0]
         self._session_started_at: float | None = None
@@ -168,7 +161,7 @@ class FitnessCoachUI:
         self.status_dot.pack(side="left", padx=(0, 8))
         self.status_label = tk.Label(
             status_box,
-            text="正在检测设备",
+            text="待命",
             bg=self.PANEL_ALT,
             fg=self.TEXT,
             font=(self.font_family, 13, "bold"),
@@ -206,7 +199,7 @@ class FitnessCoachUI:
         self.video_hint_id = self.video_canvas.create_text(
             0,
             0,
-            text="选择设备后，点击右侧开始训练",
+            text="点击开始训练，在浏览器中授权音视频设备",
             fill=self.MUTED,
             font=(self.font_family, 13),
         )
@@ -238,6 +231,45 @@ class FitnessCoachUI:
             fg=self.GREEN,
             font=(self.font_family, 12, "bold"),
         ).pack(side="right", padx=16)
+
+        metrics = tk.Frame(left, bg=self.PANEL, height=100)
+        metrics.grid(row=2, column=0, sticky="ew")
+        metrics.grid_propagate(False)
+        metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="pose-metric")
+        self.pose_angle_labels: list[tk.Label] = []
+        for column, title in enumerate(("左膝 · 2D", "右膝 · 2D", "左髋 · 2D", "右髋 · 2D")):
+            tk.Label(
+                metrics,
+                text=title,
+                bg=self.PANEL,
+                fg=self.MUTED,
+                font=(self.font_family, 11),
+            ).grid(row=0, column=column, sticky="w", padx=16)
+            label = tk.Label(
+                metrics,
+                text="--",
+                bg=self.PANEL,
+                fg=self.TEXT,
+                font=("Menlo", 16, "bold"),
+                width=7,
+                anchor="w",
+            )
+            label.grid(row=1, column=column, sticky="w", padx=16, pady=(2, 4))
+            self.pose_angle_labels.append(label)
+        self.pose_status_label = tk.Label(
+            metrics,
+            text="等待姿态数据",
+            bg=self.PANEL,
+            fg=self.MUTED,
+            font=(self.font_family, 11),
+            anchor="w",
+            justify="left",
+        )
+        self.pose_status_label.grid(row=2, column=0, columnspan=4, sticky="ew", padx=16)
+        metrics.bind(
+            "<Configure>",
+            lambda event: self.pose_status_label.configure(wraplength=max(100, event.width - 32)),
+        )
 
     def _build_control_panel(self, parent: tk.Widget) -> None:
         side = tk.Frame(parent, bg=self.BG, width=332)
@@ -315,30 +347,19 @@ class FitnessCoachUI:
         )
         self.target_spinbox.grid(row=0, column=1, sticky="e", ipady=6)
 
-        self._section_title(settings, "本地设备").grid(row=3, column=0, sticky="w")
-        self.input_combo = self._device_combo(settings, 4, "麦克风")
-        self.output_combo = self._device_combo(settings, 5, "扬声器")
-        self.camera_combo = self._device_combo(settings, 6, "摄像头")
-
-        self.refresh_button = tk.Button(
+        self._section_title(settings, "浏览器音视频").grid(row=3, column=0, sticky="w")
+        tk.Label(
             settings,
-            text="重新检测设备",
-            command=lambda: self.actions.put(("refresh", None)),
+            text="开始后自动打开浏览器\n请授权麦克风与摄像头\n教练声音在浏览器播放\n全双工回声消除 · 支持同时说话",
             bg=self.PANEL,
-            fg=self.BLUE,
-            activebackground=self.PANEL,
-            activeforeground=self.TEXT,
-            bd=0,
-            relief="flat",
-            cursor="hand2",
-            anchor="w",
-            font=(self.font_family, 12, "bold"),
-        )
-        self.refresh_button.grid(row=7, column=0, sticky="w", pady=(6, 0))
+            fg=self.MUTED,
+            justify="left",
+            font=(self.font_family, 12),
+        ).grid(row=4, column=0, sticky="w", pady=(10, 0))
 
         self.primary_button = tk.Button(
             side,
-            text="正在检测设备...",
+            text="开始训练",
             command=self._primary_action,
             bg=self.PANEL_ALT,
             fg=self.MUTED,
@@ -452,65 +473,18 @@ class FitnessCoachUI:
         self.alive = False
         self.actions.put(("close", None))
 
-    def set_devices(self, catalog: DeviceCatalog) -> None:
-        self.devices = catalog
-        self._set_combo_devices(self.input_combo, catalog.audio_inputs)
-        self._set_combo_devices(self.output_combo, catalog.audio_outputs)
-        self._set_combo_devices(self.camera_combo, catalog.cameras)
-
-        ready = bool(catalog.audio_inputs and catalog.audio_outputs and catalog.cameras)
-        if ready:
-            self.set_state("idle", "设备就绪")
-            self.append_log("本地设备检测完成，可以开始训练。", "success")
-        else:
-            missing: list[str] = []
-            if not catalog.audio_inputs:
-                missing.append("麦克风")
-            if not catalog.audio_outputs:
-                missing.append("扬声器")
-            if not catalog.cameras:
-                missing.append("摄像头（需要安装 ffmpeg）")
-            self.set_state("error", "设备不可用")
-            self.append_log("未找到" + "、".join(missing) + "。", "error")
-
-    def _set_combo_devices(self, combo: ttk.Combobox, devices: list[Any]) -> None:
-        names = [self._device_name(device) for device in devices]
-        combo.configure(values=names, state="readonly" if names else "disabled")
-        if not names:
-            combo.set("未检测到")
-            return
-        default_index = next(
-            (index for index, device in enumerate(devices) if getattr(device, "is_default", False)),
-            0,
-        )
-        combo.current(default_index)
-
-    @staticmethod
-    def _device_name(device: Any) -> str:
-        name = str(getattr(device, "name", "未知设备"))
-        return f"{name}（默认）" if getattr(device, "is_default", False) else name
-
     def current_settings(self) -> SessionSettings:
-        if self.devices is None:
-            raise ValueError("设备尚未检测完成")
-        indices = (
-            self.input_combo.current(),
-            self.output_combo.current(),
-            self.camera_combo.current(),
-        )
-        if min(indices) < 0:
-            raise ValueError("请选择完整的音视频设备")
         target = max(1, min(99, int(self.target_var.get())))
         return SessionSettings(
-            audio_input=self.devices.audio_inputs[indices[0]],
-            audio_output=self.devices.audio_outputs[indices[1]],
-            camera=self.devices.cameras[indices[2]],
             exercise=self._exercise,
             target_reps=target,
         )
 
     def set_state(self, state: str, detail: str = "") -> None:
         self._state = state
+        if state not in {"starting", "running"}:
+            self._pose_session_id = None
+            self._reset_pose()
         labels = {
             "detecting": ("正在检测设备", self.MUTED),
             "idle": ("待命", self.MUTED),
@@ -524,17 +498,7 @@ class FitnessCoachUI:
         self.status_dot.configure(fg=color)
 
         is_configurable = state in {"idle", "error"}
-        has_devices = bool(
-            self.devices
-            and self.devices.audio_inputs
-            and self.devices.audio_outputs
-            and self.devices.cameras
-        )
-        combo_state = "readonly" if is_configurable and has_devices else "disabled"
-        for combo in (self.input_combo, self.output_combo, self.camera_combo):
-            combo.configure(state=combo_state)
         self.target_spinbox.configure(state="normal" if is_configurable else "disabled")
-        self.refresh_button.configure(state="normal" if is_configurable else "disabled")
         for button in self.exercise_buttons.values():
             button.configure(state="normal" if is_configurable else "disabled")
 
@@ -554,7 +518,7 @@ class FitnessCoachUI:
                 fg=self.MUTED,
                 cursor="arrow",
             )
-        elif has_devices:
+        elif is_configurable:
             self.primary_button.configure(
                 text="开始训练",
                 state="normal",
@@ -591,6 +555,70 @@ class FitnessCoachUI:
         with contextlib.suppress(queue.Full):
             self.frames.put_nowait(frame)
 
+    def _reset_pose(self) -> None:
+        self._latest_pose = None
+        self._pose_order = (0, 0)
+        while not self.poses.empty():
+            with contextlib.suppress(queue.Empty):
+                self.poses.get_nowait()
+        self._draw_pose()
+
+    def begin_pose_session(self, session_id: str) -> None:
+        self._pose_session_id = session_id
+        self._reset_pose()
+
+    def submit_pose(self, snapshot: PoseSnapshot) -> None:
+        if (
+            self._state not in {"starting", "running"}
+            or snapshot.session_id != self._pose_session_id
+        ):
+            return
+        order = (snapshot.stream_epoch, snapshot.frame_id)
+        if order <= self._pose_order:
+            return
+        self._pose_order = order
+        if self.poses.full():
+            with contextlib.suppress(queue.Empty):
+                self.poses.get_nowait()
+        with contextlib.suppress(queue.Full):
+            self.poses.put_nowait(snapshot)
+
+    def _draw_pose(self) -> None:
+        while not self.poses.empty():
+            try:
+                snapshot = self.poses.get_nowait()
+            except queue.Empty:
+                break
+            if snapshot.session_id != self._pose_session_id:
+                continue
+            if self._latest_pose is None or (snapshot.stream_epoch, snapshot.frame_id) > (
+                self._latest_pose.stream_epoch,
+                self._latest_pose.frame_id,
+            ):
+                self._latest_pose = snapshot
+        snapshot = self._latest_pose
+        stale = snapshot is not None and snapshot.is_stale(time.monotonic())
+        angles = snapshot.angles.values() if snapshot is not None and not stale else (None,) * 4
+        for label, value in zip(self.pose_angle_labels, angles):
+            label.configure(text=f"{value:.1f}°" if value is not None else "--")
+        statuses = {
+            "observable": "单人 · 投影角度可观测",
+            "partial": "单人 · 部分关键点不可用",
+            "unobservable": "关键点不可用 · 角度不可判定",
+            "no_person": "未检测到人体",
+            "multiple_people": "多人入镜 · 角度不可判定",
+            "inference_error": "姿态推理失败",
+        }
+        if snapshot is None:
+            text = "等待姿态数据"
+        elif stale:
+            text = "姿态数据已过期"
+        else:
+            text = statuses[snapshot.status]
+            if snapshot.status != "inference_error":
+                text += f" · {len(snapshot.detections)} 人 · {snapshot.processing_ms:.0f} ms"
+        self.pose_status_label.configure(text=text)
+
     def append_log(self, text: str, tag: str = "normal") -> None:
         self.log_text.configure(state="normal")
         self.log_text.insert("end", text.rstrip() + "\n", tag)
@@ -603,6 +631,7 @@ class FitnessCoachUI:
     def update(self) -> None:
         self._drain_logs()
         self._draw_latest_frame()
+        self._draw_pose()
         self._update_elapsed()
 
     def _drain_logs(self) -> None:
@@ -651,28 +680,6 @@ class FitnessCoachUI:
         self.elapsed_label.configure(text=f"{elapsed // 60:02d}:{elapsed % 60:02d}")
 
 
-def discover_devices() -> DeviceCatalog:
-    from vision_agents.plugins.local.devices import (
-        CameraDevice,
-        list_audio_input_devices,
-        list_audio_output_devices,
-        list_cameras,
-    )
-
-    is_macos_without_ffmpeg = platform.system() == "Darwin" and shutil.which("ffmpeg") is None
-    cameras = [] if is_macos_without_ffmpeg else list_cameras()
-    if not cameras and platform.system() == "Darwin":
-        # PyAV can open AVFoundation device 0 even when the ffmpeg CLI used by
-        # the SDK's name enumerator is not installed.
-        cameras = [CameraDevice(index=0, name="系统默认摄像头", device="0")]
-
-    return DeviceCatalog(
-        audio_inputs=list_audio_input_devices(),
-        audio_outputs=list_audio_output_devices(),
-        cameras=cameras,
-    )
-
-
 async def run_desktop() -> None:
     root = tk.Tk()
     ui = FitnessCoachUI(root)
@@ -684,9 +691,8 @@ async def run_desktop() -> None:
     root_logger.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
     root_logger.addHandler(handler)
 
-    discovery_task: asyncio.Task[DeviceCatalog] | None = asyncio.create_task(
-        asyncio.to_thread(discover_devices), name="device-discovery"
-    )
+    ui.set_state("idle", "待命")
+    ui.append_log("音视频由浏览器采集与播放，开始训练后请完成浏览器授权。")
 
     try:
         while ui.alive:
@@ -697,14 +703,6 @@ async def run_desktop() -> None:
                 ui.alive = False
                 break
 
-            if discovery_task is not None and discovery_task.done():
-                try:
-                    ui.set_devices(discovery_task.result())
-                except Exception as exc:
-                    ui.set_state("error", "设备检测失败")
-                    ui.append_log(f"设备检测失败：{exc}", "error")
-                discovery_task = None
-
             while True:
                 try:
                     action, payload = ui.actions.get_nowait()
@@ -714,21 +712,12 @@ async def run_desktop() -> None:
                     controller.start(payload)
                 elif action == "stop":
                     controller.stop()
-                elif action == "refresh" and discovery_task is None:
-                    ui.set_state("detecting")
-                    discovery_task = asyncio.create_task(
-                        asyncio.to_thread(discover_devices), name="device-refresh"
-                    )
                 elif action == "close":
                     ui.alive = False
 
             ui.update()
             await asyncio.sleep(1 / 60)
     finally:
-        if discovery_task is not None:
-            discovery_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await discovery_task
         await controller.shutdown()
         root_logger.removeHandler(handler)
         with contextlib.suppress(tk.TclError):

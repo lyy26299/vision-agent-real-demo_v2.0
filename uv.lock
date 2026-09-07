@@ -2147,6 +2147,9 @@ name = "vision-agent-real-demo"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
+    { name = "aiortc" },
+    { name = "av" },
     { name = "certifi" },
     { name = "python-dotenv" },
     { name = "vision-agents", extra = ["gemini", "getstream", "local", "qwen", "ultralytics"] },
@@ -2164,6 +2167,9 @@ openai = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = "==3.14.3" },
+    { name = "aiortc", specifier = "==1.14.0" },
+    { name = "av", specifier = "==16.1.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.0.0" },
     { name = "certifi", specifier = ">=2024.8.30" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
