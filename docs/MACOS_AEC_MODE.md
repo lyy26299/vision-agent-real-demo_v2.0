@@ -1,3 +1,7 @@
+# Experimental / Frozen: Apple VoiceProcessingIO Mode
+
+> This path is preserved for A/B comparison only. The default local audio backend is now WebRTC APM / AEC3. Use agent_local_vpio.py only for experiments.
+
 # macOS Full-Duplex AEC Mode
 
 ## 1. Why this mode exists
