@@ -92,6 +92,7 @@ def discover_devices() -> DeviceCatalog:
         cameras = [CameraDevice(index=0, name="系统默认摄像头", device="0")]
 
     audio_input, audio_output = make_aec_devices()
+    audio_input.backend.prepare()
     return DeviceCatalog(
         audio_inputs=[audio_input],
         audio_outputs=[audio_output],
