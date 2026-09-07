@@ -6,7 +6,7 @@ private enum WireType: UInt8 {
     case flush = 0x46    // F
     case stop = 0x53     // S
 
-    case mic = 0x4D      // M: Swift -> Python PCM16 mono @ 48 kHz
+    case mic = 0x4D      // M: Swift -> Python PCM16 mono @ negotiated input rate
     case ready = 0x52    // R
     case error = 0x45    // E
 }
@@ -20,6 +20,10 @@ private let audioControlQueue = DispatchQueue(label: "vision.coach.aec.control")
 private func log(_ message: String) {
     guard let data = ("[macos-aec] " + message + "\n").data(using: .utf8) else { return }
     stderrHandle.write(data)
+}
+
+private func describe(_ format: AVAudioFormat) -> String {
+    return "\(Int(format.sampleRate))Hz/\(format.channelCount)ch/\(format.commonFormat.rawValue)"
 }
 
 private func writeFrame(_ type: WireType, payload: Data = Data()) {
@@ -60,49 +64,47 @@ private func readCommand() -> (WireType, Data)? {
 }
 
 final class VoiceProcessingBridge {
-    private let sampleRate: Double = 48_000
-    private let channels: AVAudioChannelCount = 1
+    private let playbackSampleRate: Double = 48_000
+    private let playbackChannels: AVAudioChannelCount = 1
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var playbackFormat: AVAudioFormat!
-    private var captureFormat: AVAudioFormat!
     private var warmupUntil = DispatchTime.now()
+    private var readySent = false
 
     func start() throws {
         playbackFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: channels,
-            interleaved: false
-        )
-        captureFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: channels,
+            sampleRate: playbackSampleRate,
+            channels: playbackChannels,
             interleaved: false
         )
 
-        guard playbackFormat != nil, captureFormat != nil else {
+        guard playbackFormat != nil else {
             throw NSError(
                 domain: "VisionCoachAEC",
                 code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to create 48 kHz mono AVAudioFormat"]
+                userInfo: [NSLocalizedDescriptionKey: "Failed to create 48 kHz mono playback format"]
             )
         }
 
+        let inputNode = engine.inputNode
+        let outputNode = engine.outputNode
+
+        let inputBefore = inputNode.outputFormat(forBus: 0)
+        let outputBefore = outputNode.inputFormat(forBus: 0)
+        log("before VPIO input=\(describe(inputBefore)) output=\(describe(outputBefore))")
+
         engine.attach(player)
 
-        // Apple requires the engine to be stopped while switching I/O nodes
-        // into voice-processing mode. Enabling it on one I/O node switches
-        // the engine to VoiceProcessingIO; we verify both sides afterwards.
+        // Apple requires the engine to be stopped while switching the I/O
+        // nodes into voice-processing mode. Enabling either I/O node causes
+        // AVAudioEngine to switch both sides to VoiceProcessingIO.
         engine.stop()
-        try engine.inputNode.setVoiceProcessingEnabled(true)
-        if !engine.outputNode.isVoiceProcessingEnabled {
-            try engine.outputNode.setVoiceProcessingEnabled(true)
-        }
+        try inputNode.setVoiceProcessingEnabled(true)
 
-        guard engine.inputNode.isVoiceProcessingEnabled,
-              engine.outputNode.isVoiceProcessingEnabled else {
+        guard inputNode.isVoiceProcessingEnabled,
+              outputNode.isVoiceProcessingEnabled else {
             throw NSError(
                 domain: "VisionCoachAEC",
                 code: 2,
@@ -110,12 +112,22 @@ final class VoiceProcessingBridge {
             )
         }
 
+        let inputAfter = inputNode.outputFormat(forBus: 0)
+        let outputAfter = outputNode.inputFormat(forBus: 0)
+        log("after VPIO input=\(describe(inputAfter)) output=\(describe(outputAfter))")
+
+        // Keep Qwen playback at the stable 48 kHz mono contract. The main
+        // mixer is responsible for conversion to the active Core Audio route.
         engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
 
-        engine.inputNode.installTap(
+        // IMPORTANT: do not force the microphone tap to 48 kHz mono.
+        // VoiceProcessingIO negotiates an aggregate/client format on macOS.
+        // Supplying an explicit incompatible tap format can make output-node
+        // initialization fail with kAudioUnitErr_FailedInitialization (-10875).
+        inputNode.installTap(
             onBus: 0,
             bufferSize: 960,
-            format: captureFormat
+            format: nil
         ) { [weak self] buffer, _ in
             self?.emitMic(buffer)
         }
@@ -124,37 +136,49 @@ final class VoiceProcessingBridge {
         try engine.start()
         player.play()
 
-        // Voice-processing AEC needs a short convergence interval at startup.
-        // Feed silence through the exact playback graph that will carry Qwen
-        // audio, and discard microphone frames during the warm-up.
         warmupUntil = DispatchTime.now() + .milliseconds(350)
         scheduleSilence(milliseconds: 350)
 
-        let ready = """
-        {"sample_rate":48000,"channels":1,"voice_processing":true}
-        """.data(using: .utf8) ?? Data()
-        writeFrame(.ready, payload: ready)
-        log("VoiceProcessingIO active: 48 kHz mono full-duplex")
+        log("VoiceProcessingIO engine started; waiting for first microphone buffer")
     }
 
     private func scheduleSilence(milliseconds: Int) {
-        let frames = Int(sampleRate * Double(milliseconds) / 1000.0)
+        let frames = Int(playbackSampleRate * Double(milliseconds) / 1000.0)
         let data = Data(count: frames * MemoryLayout<Int16>.size)
         schedulePlayback(data)
     }
 
+    private func emitReadyIfNeeded(_ buffer: AVAudioPCMBuffer) {
+        guard !readySent else { return }
+        readySent = true
+
+        let sampleRate = Int(buffer.format.sampleRate.rounded())
+        let payload = """
+        {"sample_rate":\(sampleRate),"channels":1,"voice_processing":true}
+        """.data(using: .utf8) ?? Data()
+
+        writeFrame(.ready, payload: payload)
+        log("VoiceProcessingIO active: capture=\(sampleRate)Hz/1ch playback=48000Hz/1ch")
+    }
+
     private func emitMic(_ buffer: AVAudioPCMBuffer) {
+        emitReadyIfNeeded(buffer)
+
         if DispatchTime.now() < warmupUntil {
             return
         }
-        guard let channels = buffer.floatChannelData else { return }
+
+        guard let channelData = buffer.floatChannelData else { return }
         let frameCount = Int(buffer.frameLength)
         guard frameCount > 0 else { return }
 
+        // Voice capture sent to Python is intentionally mono. For a
+        // multi-channel negotiated input, use the first VPIO-processed channel
+        // rather than forcing the tap itself to a mono format.
+        let src = channelData[0]
         var payload = Data(count: frameCount * MemoryLayout<Int16>.size)
         payload.withUnsafeMutableBytes { raw in
             guard let dst = raw.bindMemory(to: Int16.self).baseAddress else { return }
-            let src = channels[0]
             for i in 0..<frameCount {
                 let clipped = max(-1.0, min(1.0, src[i]))
                 dst[i] = Int16(clipped * 32767.0)
@@ -174,8 +198,8 @@ final class VoiceProcessingBridge {
         }
         buffer.frameLength = AVAudioFrameCount(sampleCount)
 
-        guard let channels = buffer.floatChannelData else { return }
-        let dst = channels[0]
+        guard let channelData = buffer.floatChannelData else { return }
+        let dst = channelData[0]
         data.withUnsafeBytes { raw in
             let src = raw.bindMemory(to: Int16.self)
             let count = min(sampleCount, src.count)
@@ -215,9 +239,23 @@ let bridge = VoiceProcessingBridge()
 do {
     try bridge.start()
 } catch {
-    let payload = String(describing: error).data(using: .utf8) ?? Data()
+    let nsError = error as NSError
+    var message = String(describing: error)
+
+    if nsError.code == -10875 {
+        message += """
+        
+        HINT: Core Audio returned kAudioUnitErr_FailedInitialization (-10875).
+        On macOS VoiceProcessingIO this commonly occurs when the current system
+        input/output routes cannot form a compatible voice-processing pair.
+        First test with System Settings > Sound using the built-in MacBook
+        microphone AND built-in MacBook speakers, then restart this helper.
+        """
+    }
+
+    let payload = message.data(using: .utf8) ?? Data()
     writeFrame(.error, payload: payload)
-    log("startup failed: \(error)")
+    log("startup failed: \(message)")
     exit(2)
 }
 
