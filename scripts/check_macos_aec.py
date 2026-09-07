@@ -20,6 +20,24 @@ def main() -> int:
         print("SKIP: macOS only")
         return 0
 
+    try:
+        import sounddevice as sd
+
+        default_in, default_out = sd.default.device
+        input_info = sd.query_devices(default_in)
+        output_info = sd.query_devices(default_out)
+        print(
+            "DEFAULT_AUDIO_ROUTE",
+            {
+                "input": input_info.get("name"),
+                "input_channels": input_info.get("max_input_channels"),
+                "output": output_info.get("name"),
+                "output_channels": output_info.get("max_output_channels"),
+            },
+        )
+    except Exception as exc:
+        print(f"DEFAULT_AUDIO_ROUTE unavailable: {exc}")
+
     backend = MacOSVoiceProcessingBackend()
     try:
         backend.start_client("smoke")
