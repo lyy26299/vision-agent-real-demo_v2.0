@@ -325,7 +325,7 @@ class MacOSVoiceProcessingBackend:
         if not needs_build:
             return binary
 
-        LOGGER.info("首次启动 AEC：正在编译原生 AVAudioEngine bridge...")
+        LOGGER.info("首次启动 AEC：正在编译原生 VoiceProcessingIO bridge...")
         result = subprocess.run(
             [swiftc, "-O", str(source), "-o", str(binary)],
             capture_output=True,
