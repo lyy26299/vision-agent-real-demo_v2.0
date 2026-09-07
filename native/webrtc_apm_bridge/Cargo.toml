@@ -1,0 +1,18 @@
+[package]
+name = "visioncoach-webrtc-apm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "visioncoach_webrtc_apm"
+crate-type = ["cdylib"]
+
+[dependencies]
+webrtc-audio-processing = { version = "=2.1.0", features = ["bundled"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
