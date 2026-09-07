@@ -94,6 +94,10 @@ class MacOSVoiceProcessingBackend:
     def name(self) -> str:
         return "Apple VoiceProcessingIO / AVAudioEngine (AEC)"
 
+    def prepare(self) -> Path:
+        """Compile/cache the native helper without opening microphone audio."""
+        return self._ensure_native_bridge()
+
     @property
     def status(self) -> dict[str, object]:
         return dict(self._status)
