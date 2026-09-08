@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![YOLO](https://img.shields.io/badge/YOLO-v11-red.svg)](https://github.com/ultralytics/ultralytics)
 
-**[中文文档](./docs/README_CN.md)** | **[Quick Start](./docs/QUICKSTART.md)** | **[Troubleshooting](./docs/TROUBLESHOOTING.md)**
+**[中文文档](./docs/README_CN.md)** | **[Quick Start](./docs/QUICKSTART.md)** | **[Fast–Slow Agent Research](./docs/FAST_SLOW_DUAL_PROCESS_AGENT_RESEARCH.md)** | **[Troubleshooting](./docs/TROUBLESHOOTING.md)**
 
 ---
 
