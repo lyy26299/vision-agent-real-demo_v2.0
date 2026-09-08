@@ -47,7 +47,7 @@ class BrowserAudioTests(unittest.IsolatedAsyncioTestCase):
         writer = asyncio.create_task(track.write(tone(count=48000), final=True))
         await asyncio.sleep(0)
         self.assertFalse(writer.done())
-        self.assertEqual(len(track.frames), 25)
+        self.assertEqual(len(track.frames), track.max_frames)
         await track.flush()
         await asyncio.wait_for(writer, 1)
         self.assertEqual(len(track.frames), 0)
@@ -58,7 +58,7 @@ class BrowserAudioTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(writer, 1)
 
     async def test_resample_tail_and_monotonic_clock(self):
-        track = BrowserAudioTrack()
+        track = BrowserAudioTrack(start_buffer_ms=20, resume_buffer_ms=20)
         track.active = True
         await track.write(tone(), final=True)
         frames = [await track.recv() for _ in range(len(track.frames))]
@@ -71,13 +71,117 @@ class BrowserAudioTests(unittest.IsolatedAsyncioTestCase):
         track.stop()
 
     async def test_flush_removes_queue_and_resampler_tail(self):
-        track = BrowserAudioTrack()
+        track = BrowserAudioTrack(start_buffer_ms=20, resume_buffer_ms=20)
         track.active = True
         await track.write(tone(count=2400))
         await track.flush()
         await track.write(PcmData(24000, "s16"), final=True)
         frame = await track.recv()
         self.assertEqual(np.abs(frame.to_ndarray()).max(), 0)
+        track.stop()
+
+    async def test_prebuffer_and_underrun_recovery_smooth_bursty_deltas(self):
+        track = BrowserAudioTrack(
+            start_buffer_ms=60,
+            resume_buffer_ms=40,
+            max_buffer_ms=200,
+        )
+        track.active = True
+
+        # Two frames are below the start threshold and therefore do not
+        # response; the first render tick must remain silent.
+        await track.write(tone(count=960))
+        first = await track.recv()
+        self.assertEqual(np.abs(first.to_ndarray()).max(), 0)
+        self.assertTrue(track.is_buffering)
+
+        # Two more frames complete the start buffer.  Playback then begins
+        # with audio rather than exposing the burst boundary as a gap.
+        await track.write(tone(count=960))
+        second = await track.recv()
+        self.assertGreater(np.abs(second.to_ndarray()).max(), 100)
+        self.assertFalse(track.is_buffering)
+
+        # Consume the remaining frames and force exactly one underrun.
+        while track.frames:
+            await track.recv()
+        underrun = await track.recv()
+        self.assertEqual(np.abs(underrun.to_ndarray()).max(), 0)
+        self.assertEqual(track.underrun_count, 1)
+        self.assertTrue(track.is_buffering)
+
+        # Resume requires the smaller recovery buffer.
+        await track.write(tone(count=960))
+        resumed = await track.recv()
+        self.assertGreater(np.abs(resumed.to_ndarray()).max(), 100)
+        self.assertFalse(track.is_buffering)
+        track.stop()
+
+    async def test_initial_playout_uses_start_threshold_not_resume_threshold(self):
+        track = BrowserAudioTrack(
+            start_buffer_ms=60,
+            resume_buffer_ms=20,
+            max_buffer_ms=200,
+        )
+        track.active = True
+
+        await track.write(tone(count=1440))
+        self.assertEqual(len(track.frames), 2)
+        first = await track.recv()
+        self.assertEqual(np.abs(first.to_ndarray()).max(), 0)
+        self.assertEqual(track.playout_state, "priming")
+
+        await track.write(tone(count=480))
+        second = await track.recv()
+        self.assertGreater(np.abs(second.to_ndarray()).max(), 100)
+        self.assertEqual(track.playout_state, "playing")
+        track.stop()
+
+    async def test_final_short_utterance_bypasses_prebuffer_without_underrun(self):
+        track = BrowserAudioTrack(
+            start_buffer_ms=200,
+            resume_buffer_ms=240,
+            max_buffer_ms=400,
+        )
+        track.active = True
+
+        await track.write(tone(count=480), final=True)
+        self.assertEqual(len(track.frames), 1)
+        audio = await track.recv()
+        self.assertGreater(np.abs(audio.to_ndarray()).max(), 100)
+        silence = await track.recv()
+        self.assertEqual(np.abs(silence.to_ndarray()).max(), 0)
+        self.assertEqual(track.playout_state, "idle")
+        self.assertEqual(track.underrun_count, 0)
+        track.stop()
+
+    async def test_rebuffer_can_require_more_audio_than_initial_playout(self):
+        track = BrowserAudioTrack(
+            start_buffer_ms=20,
+            resume_buffer_ms=60,
+            max_buffer_ms=200,
+        )
+        track.active = True
+
+        await track.write(tone(count=960))
+        self.assertGreater(np.abs((await track.recv()).to_ndarray()).max(), 100)
+        self.assertEqual(np.abs((await track.recv()).to_ndarray()).max(), 0)
+        self.assertEqual(track.playout_state, "rebuffering")
+        await track.write(tone(count=960))
+        self.assertEqual(np.abs((await track.recv()).to_ndarray()).max(), 0)
+        await track.write(tone(count=480))
+        self.assertGreater(np.abs((await track.recv()).to_ndarray()).max(), 100)
+        track.stop()
+
+    async def test_flush_resets_prebuffer_and_discards_late_audio(self):
+        track = BrowserAudioTrack(start_buffer_ms=60, resume_buffer_ms=40)
+        track.active = True
+        await track.write(tone(count=1440))
+        await track.flush()
+        await track.write(tone(count=480))
+        frame = await track.recv()
+        self.assertEqual(np.abs(frame.to_ndarray()).max(), 0)
+        self.assertEqual(track.underrun_count, 0)
         track.stop()
 
 
@@ -167,6 +271,30 @@ class BrowserLoopbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QwenDuplexTests(unittest.IsolatedAsyncioTestCase):
+    def test_semantic_vad_session_config(self):
+        llm = DuplexQwenRealtime(
+            api_key="offline-test",
+            vad_type="semantic_vad",
+            vad_threshold=0.2,
+            vad_silence_duration_ms=900,
+        )
+        self.addCleanup(llm._executor.shutdown, wait=False)
+        llm._instructions = "test"
+        turn_detection = llm._build_session_config()["turn_detection"]
+        self.assertEqual(
+            turn_detection,
+            {
+                "type": "semantic_vad",
+                "threshold": 0.2,
+                "prefix_padding_ms": 500,
+                "silence_duration_ms": 900,
+            },
+        )
+
+    def test_invalid_vad_type_is_rejected(self):
+        with self.assertRaises(ValueError):
+            DuplexQwenRealtime(api_key="offline-test", vad_type="manual")
+
     async def test_close_cancels_reader_and_closes_websocket(self):
         llm = DuplexQwenRealtime(api_key="offline-test")
         client = Mock(close=AsyncMock())
@@ -206,6 +334,66 @@ class QwenDuplexTests(unittest.IsolatedAsyncioTestCase):
         calls = llm._emit_audio_output_done_event.call_args_list
         self.assertEqual(sum(c.kwargs.get("interrupted", False) for c in calls), 2)
         self.assertTrue(any(c.kwargs.get("response_id") == "two" for c in calls))
+
+    async def test_audio_done_finalizes_playout_once_and_rejects_late_delta(self):
+        llm = DuplexQwenRealtime(api_key="offline-test")
+        self.addCleanup(llm._executor.shutdown, wait=False)
+        delta = base64.b64encode(tone().to_bytes()).decode()
+        events = [
+            {"type": "response.created", "response": {"id": "one"}},
+            {"type": "response.audio.delta", "response_id": "one", "delta": delta},
+            {"type": "response.audio.done", "response_id": "one"},
+            {"type": "response.audio.delta", "response_id": "one", "delta": delta},
+            {"type": "response.done", "response": {"id": "one", "status": "completed"}},
+        ]
+
+        async def read():
+            for event in events:
+                yield event
+
+        llm._real_client = Mock(read=read)
+        llm._emit_audio_output_event = Mock()
+        llm._emit_audio_output_done_event = Mock()
+        llm._emit_agent_speech_transcription = Mock()
+        await llm._process_events()
+        llm._emit_audio_output_event.assert_called_once()
+        llm._emit_audio_output_done_event.assert_called_once_with(response_id="one")
+        self.assertFalse(llm._response_stats)
+
+    async def test_injected_response_rejects_old_cancelled_audio_done(self):
+        llm = DuplexQwenRealtime(api_key="offline-test")
+        self.addCleanup(llm._executor.shutdown, wait=False)
+        delta = base64.b64encode(tone().to_bytes()).decode()
+        events = [
+            {"type": "response.audio.done", "response_id": "old"},
+            {"type": "response.done", "response": {"id": "old", "status": "cancelled"}},
+            {"type": "response.created", "response": {"id": "new"}},
+            {"type": "response.audio.delta", "response_id": "new", "delta": delta},
+            {"type": "response.audio.done", "response_id": "new"},
+            {"type": "response.done", "response": {"id": "new", "status": "completed"}},
+        ]
+
+        async def read():
+            for event in events:
+                yield event
+
+        client = Mock(read=read, cancel_response=AsyncMock(), send_event=AsyncMock())
+        llm._real_client = client
+        llm.connected = True
+        llm._is_responding = True
+        llm._current_response_id = "old"
+        llm._emit_audio_output_event = Mock()
+        llm._emit_audio_output_done_event = Mock()
+        llm._emit_agent_speech_transcription = Mock()
+
+        self.assertTrue(await llm.inject_text("new response", feedback_id="feedback-new"))
+        self.assertIn("old", llm._cancelled_response_ids)
+        client.cancel_response.assert_awaited_once()
+        await llm._process_events()
+
+        llm._emit_audio_output_event.assert_called_once()
+        llm._emit_audio_output_done_event.assert_called_once_with(response_id="new")
+        self.assertNotIn("old", llm._cancelled_response_ids)
 
 
 if __name__ == "__main__":

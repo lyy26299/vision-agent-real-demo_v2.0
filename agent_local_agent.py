@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import ssl
 import uuid
@@ -14,8 +15,8 @@ from typing import Any, Protocol
 import certifi
 from dotenv import load_dotenv
 
-from coach.memory.store import MemoryStore
 from coach.memory.consolidate import consolidate_session
+from coach.memory.store import MemoryStore
 from coach.memory.writer import LedgerWriter
 from coach.models import MotionSnapshot, PoseSnapshot
 from coach.qwen_contract import CHINA_BASE_URL, QWEN_REALTIME_MODEL
@@ -71,7 +72,42 @@ def make_dashboard_edge(settings: SessionSettings, frame_sink: Callable[[Any], N
     """Browser owns device I/O; processed video stays in the dashboard."""
     from coach.browser_edge import BrowserEdge
 
-    return BrowserEdge(frame_sink=frame_sink)
+    return BrowserEdge(
+        frame_sink=frame_sink,
+        audio_start_buffer_ms=_env_float(
+            "COACH_AUDIO_START_BUFFER_MS", 160.0, minimum=20.0, maximum=2000.0
+        ),
+        audio_resume_buffer_ms=_env_float(
+            "COACH_AUDIO_REBUFFER_MS", 200.0, minimum=20.0, maximum=2000.0
+        ),
+        audio_max_buffer_ms=_env_float(
+            "COACH_AUDIO_MAX_BUFFER_MS", 1000.0, minimum=20.0, maximum=5000.0
+        ),
+    )
+
+
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字") from exc
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise ValueError(f"{name} 必须在 {minimum:g}-{maximum:g} 之间")
+    return value
+
+
+def qwen_vad_settings() -> tuple[str, float, int]:
+    """Return a validated Qwen 3.5 turn-detection configuration."""
+
+    vad_type = os.getenv("QWEN_VAD_TYPE", "semantic_vad").strip()
+    if vad_type not in {"server_vad", "semantic_vad"}:
+        raise ValueError("QWEN_VAD_TYPE 必须是 server_vad 或 semantic_vad")
+    threshold = _env_float("QWEN_VAD_THRESHOLD", 0.2, minimum=-1.0, maximum=1.0)
+    silence_ms = _env_float("QWEN_VAD_SILENCE_MS", 900.0, minimum=200.0, maximum=6000.0)
+    if not silence_ms.is_integer():
+        raise ValueError("QWEN_VAD_SILENCE_MS 必须是整数")
+    return vad_type, threshold, int(silence_ms)
 
 
 def session_instructions(settings: SessionSettings) -> str:
@@ -79,6 +115,7 @@ def session_instructions(settings: SessionSettings) -> str:
         "Read @docs/COACHING_INSTRUCTIONS.md\n\n"
         f"本次训练项目：{settings.exercise}。目标：{settings.target_reps} 次。"
         "优先观察这个动作，清晰计数，并只在必要时给出一句纠正。"
+        "实时动作反馈严格限制为一个不超过 20 个汉字的短句，不要列点或连续补充。"
     )
 
 
@@ -277,6 +314,7 @@ class SessionController:
 
             self.ui.set_state("starting", "正在连接实时教练")
             edge = make_dashboard_edge(settings, self.ui.submit_frame)
+            vad_type, vad_threshold, vad_silence_ms = qwen_vad_settings()
             qwen = DuplexQwenRealtime(
                 model=os.getenv("QWEN_REALTIME_MODEL", QWEN_REALTIME_MODEL),
                 fps=1,
@@ -286,7 +324,9 @@ class SessionController:
                     CHINA_BASE_URL,
                 ),
                 voice=os.getenv("QWEN_VOICE", "Ethan"),
-                vad_threshold=0.35,
+                vad_type=vad_type,
+                vad_threshold=vad_threshold,
+                vad_silence_duration_ms=vad_silence_ms,
             )
             if self.memory_store is None or self.working_memory is None or self.motion_runtime is None:
                 raise RuntimeError("训练记忆尚未准备好")

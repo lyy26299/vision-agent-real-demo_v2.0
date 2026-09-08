@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import secrets
 import time
@@ -41,9 +42,40 @@ LOGGER = logging.getLogger("vision_coach")
 
 
 class BrowserAudioTrack(AudioStreamTrack):
-    """Continuous 48 kHz render clock; no microphone muting during playback."""
+    """Continuous 48 kHz render clock with a small adaptive jitter buffer.
 
-    def __init__(self):
+    Qwen audio deltas arrive in bursts.  WebRTC still needs one 20 ms frame at
+    every ``recv`` tick, so an empty queue is rendered as silence.  Waiting for
+    a short prebuffer before starting (and after an underrun) prevents a bursty
+    network stream from turning into many tiny audible gaps.
+    """
+
+    def __init__(
+        self,
+        *,
+        start_buffer_ms: float = 160.0,
+        resume_buffer_ms: float = 200.0,
+        max_buffer_ms: float = 1000.0,
+    ):
+        self._chunk_ms = 20.0
+        for name, value in (
+            ("start_buffer_ms", start_buffer_ms),
+            ("resume_buffer_ms", resume_buffer_ms),
+            ("max_buffer_ms", max_buffer_ms),
+        ):
+            if not math.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        start_buffer_ms = float(start_buffer_ms)
+        resume_buffer_ms = float(resume_buffer_ms)
+        max_buffer_ms = float(max_buffer_ms)
+        if max(start_buffer_ms, resume_buffer_ms) > max_buffer_ms:
+            raise ValueError("start_buffer_ms and resume_buffer_ms must not exceed max_buffer_ms")
+        self.start_buffer_ms = start_buffer_ms
+        self.resume_buffer_ms = resume_buffer_ms
+        self.max_buffer_ms = max_buffer_ms
+        self._start_frames = max(1, math.ceil(self.start_buffer_ms / self._chunk_ms))
+        self._resume_frames = max(1, math.ceil(self.resume_buffer_ms / self._chunk_ms))
+        self._max_frames = max(self._start_frames, math.ceil(self.max_buffer_ms / self._chunk_ms))
         super().__init__()
         self.frames = deque()
         self.resampler = FrameResampler(48000, "mono", "s16", 960)
@@ -52,6 +84,47 @@ class BrowserAudioTrack(AudioStreamTrack):
         self._deadline = None
         self._space = asyncio.Event()
         self._generation = 0
+        self._playout_state = "idle"
+        self._input_final = False
+        self._underrun_count = 0
+        self._buffering_count = 0
+
+    @property
+    def buffered_ms(self) -> float:
+        return len(self.frames) * self._chunk_ms
+
+    @property
+    def max_frames(self) -> int:
+        return self._max_frames
+
+    @property
+    def underrun_count(self) -> int:
+        return self._underrun_count
+
+    @property
+    def is_buffering(self) -> bool:
+        return self._playout_state in {"priming", "rebuffering"}
+
+    @property
+    def playout_state(self) -> str:
+        return self._playout_state
+
+    @property
+    def buffering_count(self) -> int:
+        return self._buffering_count
+
+    def _set_playout_state(self, state: str) -> None:
+        if state == self._playout_state:
+            return
+        LOGGER.debug(
+            "audio playout %s -> %s (buffered=%.0fms, final=%s, underruns=%d)",
+            self._playout_state,
+            state,
+            self.buffered_ms,
+            self._input_final,
+            self._underrun_count,
+        )
+        self._playout_state = state
 
     async def write(self, data: PcmData, final: bool = False):
         if not self.active or self.readyState != "live":
@@ -59,18 +132,43 @@ class BrowserAudioTrack(AudioStreamTrack):
         frames = self.resampler.resample(data, flush=final)
         generation = self._generation
         for frame in frames:
-            while len(self.frames) >= 25 and generation == self._generation and self.active:
+            while (
+                len(self.frames) >= self._max_frames
+                and generation == self._generation
+                and self.active
+            ):
                 self._space.clear()
                 await self._space.wait()
             if generation != self._generation or not self.active or self.readyState != "live":
                 return
+            if self._playout_state == "idle":
+                self._input_final = False
+                self._set_playout_state("priming")
+            elif self._input_final:
+                # A new utterance arrived before the previous playout queue
+                # drained. Keep the clock continuous and extend the queue.
+                self._input_final = False
             self.frames.append(frame)
+        if final and generation == self._generation:
+            self._input_final = True
+            if not self.frames and self._playout_state != "playing":
+                self._input_final = False
+                self._set_playout_state("idle")
 
     async def flush(self):
         self._generation += 1
         self.frames.clear()
         self.resampler = FrameResampler(48000, "mono", "s16", 960)
+        self._input_final = False
+        self._set_playout_state("idle")
         self._space.set()
+
+    @staticmethod
+    def _silence_frame():
+        frame = av.AudioFrame(format="s16", layout="mono", samples=960)
+        for plane in frame.planes:
+            plane.update(bytes(plane.buffer_size))
+        return frame
 
     async def recv(self):
         if self.readyState != "live":
@@ -80,13 +178,38 @@ class BrowserAudioTrack(AudioStreamTrack):
             await asyncio.sleep(max(0, self._deadline - loop.time()))
         if self.readyState != "live":
             raise MediaStreamError
-        if self.frames:
+        state = self._playout_state
+        if state == "idle":
+            frame = self._silence_frame()
+        elif state in {"priming", "rebuffering"}:
+            threshold = self._start_frames if state == "priming" else self._resume_frames
+            if self.frames and (len(self.frames) >= threshold or self._input_final):
+                self._set_playout_state("playing")
+                frame = self.frames.popleft()
+                self._space.set()
+            elif self._input_final:
+                self._input_final = False
+                self._set_playout_state("idle")
+                frame = self._silence_frame()
+            else:
+                self._buffering_count += 1
+                frame = self._silence_frame()
+        elif self.frames:
             frame = self.frames.popleft()
             self._space.set()
+        elif self._input_final:
+            # Normal end of an utterance is not an underrun. A following
+            # response will start with a fresh priming window.
+            self._input_final = False
+            self._set_playout_state("idle")
+            frame = self._silence_frame()
         else:
-            frame = av.AudioFrame(format="s16", layout="mono", samples=960)
-            for plane in frame.planes:
-                plane.update(bytes(plane.buffer_size))
+            # The fixed WebRTC clock cannot be stopped.  Render one silence
+            # frame, then wait for a resume buffer before playing again.
+            self._underrun_count += 1
+            self._buffering_count += 1
+            self._set_playout_state("rebuffering")
+            frame = self._silence_frame()
         frame.sample_rate = 48000
         frame.pts = self._pts
         frame.time_base = Fraction(1, 48000)
@@ -98,6 +221,8 @@ class BrowserAudioTrack(AudioStreamTrack):
         self.active = False
         self._space.set()
         self.frames.clear()
+        self._input_final = False
+        self._set_playout_state("idle")
         super().stop()
 
 
@@ -123,7 +248,14 @@ class BrowserConnection(Connection):
 class BrowserEdge(EdgeTransport):
     """One browser per training session, authenticated loopback signaling only."""
 
-    def __init__(self, frame_sink: Callable[[Any], None] | None = None):
+    def __init__(
+        self,
+        frame_sink: Callable[[Any], None] | None = None,
+        *,
+        audio_start_buffer_ms: float = 160.0,
+        audio_resume_buffer_ms: float = 200.0,
+        audio_max_buffer_ms: float = 1000.0,
+    ):
         super().__init__()
         self.frame_sink = frame_sink
         self.token = secrets.token_urlsafe(32)
@@ -136,7 +268,11 @@ class BrowserEdge(EdgeTransport):
         self.call = None
         self.pc = None
         self.runner = None
-        self.audio = BrowserAudioTrack()
+        self.audio = BrowserAudioTrack(
+            start_buffer_ms=audio_start_buffer_ms,
+            resume_buffer_ms=audio_resume_buffer_ms,
+            max_buffer_ms=audio_max_buffer_ms,
+        )
         self.video = {}
         self.tasks = set()
         self.participant = Participant(original=None, user_id="browser", id="browser")

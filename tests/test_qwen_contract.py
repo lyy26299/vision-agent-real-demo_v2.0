@@ -4,10 +4,11 @@ import unittest
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from vision_agents.core.instructions import Instructions
 
-from agent_local_agent import session_instructions
+from agent_local_agent import qwen_vad_settings, session_instructions
 from coach.qwen_contract import (
     CHINA_BASE_URL,
     QWEN_REALTIME_MODEL,
@@ -81,6 +82,28 @@ class QwenContractTests(unittest.TestCase):
         resolved = Instructions(input_text=text, base_dir=ROOT).full_reference
         self.assertIn("# AI 健身教练 & 交互感知助手指令", resolved)
         self.assertIn("只反馈你确定看到的", resolved)
+
+    def test_vad_environment_is_validated(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "QWEN_VAD_TYPE": "semantic_vad",
+                "QWEN_VAD_THRESHOLD": "0.2",
+                "QWEN_VAD_SILENCE_MS": "1200",
+            },
+        ):
+            self.assertEqual(qwen_vad_settings(), ("semantic_vad", 0.2, 1200))
+
+        for name, value in (
+            ("QWEN_VAD_TYPE", "manual"),
+            ("QWEN_VAD_THRESHOLD", "nan"),
+            ("QWEN_VAD_SILENCE_MS", "199"),
+            ("QWEN_VAD_SILENCE_MS", "900.5"),
+        ):
+            with self.subTest(name=name, value=value):
+                with patch.dict("os.environ", {name: value}, clear=False):
+                    with self.assertRaises(ValueError):
+                        qwen_vad_settings()
 
 
 if __name__ == "__main__":
