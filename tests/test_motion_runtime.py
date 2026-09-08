@@ -113,6 +113,21 @@ class SquatReplayTests(unittest.TestCase):
         _, _, records = runtime.ingest(pose(6, 13.5, 175))
         self.assertEqual(len(records), 1)
 
+    def test_application_pause_latches_reason_and_discards_partial_rep(self):
+        runtime = MotionRuntime(session_id="s")
+        runtime.ingest(pose(1, 10.0, 175))
+        runtime.ingest(pose(2, 10.3, 110))
+
+        paused = runtime.pause("user_reported_discomfort")
+
+        self.assertTrue(paused.paused)
+        self.assertEqual(paused.phase, "paused")
+        self.assertEqual(runtime.memory.view().pause_reason, "user_reported_discomfort")
+        runtime.resume()
+        _, _, records = runtime.ingest(pose(3, 10.6, 175))
+        self.assertEqual(records, ())
+        self.assertEqual(runtime.fsm.completed_reps, 0)
+
 
 class WorkingMemoryTests(unittest.TestCase):
     def test_pose_and_event_ttl_are_bounded_but_rep_state_is_retained(self):

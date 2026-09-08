@@ -86,6 +86,25 @@ class MotionRuntime:
     def resume(self) -> None:
         self.memory.resume()
 
+    def pause(self, reason: str) -> MotionSnapshot:
+        """Latch an application-requested pause and discard a partial rep.
+
+        Safety and operator pauses use the same local ownership boundary as
+        watchdog pauses: the FSM stops first, then WorkingMemory records the
+        explicit reason.  No language-model result can create or complete a
+        repetition through this method.
+        """
+
+        reason = str(reason).strip()
+        if not reason:
+            raise ValueError("Pause reason is required")
+        self.fsm.pause()
+        self.memory.pause(reason)
+        motion = self.fsm_snapshot(observed_at=time.monotonic(), paused=True)
+        self._last_motion = motion
+        self.memory.add_motion(motion)
+        return motion
+
     def fsm_snapshot(
         self, *, observed_at: float | None = None, paused: bool | None = None
     ) -> MotionSnapshot:
