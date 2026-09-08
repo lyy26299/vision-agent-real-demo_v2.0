@@ -8,7 +8,7 @@
 
 先限定单用户档案、单人固定机位、深蹲。LLM 负责理解和表达，不拥有最终动作次数。新增持久化须先落实授权与删除；默认不保存原始音视频，不逐帧 embedding。
 
-本轮交付 M1：结构化姿态快照。它是后面计数与记忆共同依赖的输入，不是完整 Agent Loop。M1 不接管 Qwen 语音计数、不判断动作合格、不写数据库、不宣称能跨帧识别同一个人。
+本轮交付 M0-M4 的第一个可运行垂直切片：结构化姿态快照、单人深蹲 FSM、短期工作记忆和 SQLite 事实账本。它还不是完整 Agent Loop。Qwen 不拥有权威计数；SessionController 已接入后台 `LedgerWriter`，停止/异常时会排空事实队列并结束 session。
 
 ## 2. 逐阶段实施与验收
 
@@ -16,14 +16,14 @@
 
 | 阶段 | 任务与代码落点 | 可验收输出 | 依赖 / 状态 |
 | --- | --- | --- | --- |
-| M0 基线复现 | 修复安装入口、冷启动说明；固定依赖；保留浏览器 AEC 回归 | 新环境按文档启动；缺密钥、无设备、停止可控；离线测试可重复 | 现有 AEC 基线可测试；安装入口整理仍待做 |
-| M1 姿态事实入口 | `models.py`、`geometry.py`、`pose_adapter.py`；接入 SessionController 和桌面 | 一次推理同时产出画面、全部人体 17 点、来源、时间、左右膝髋投影角；低置信度/多人/过期不冒充有效值 | 本轮实施；测试结果见第 5 节 |
-| M2 主人体与深蹲内核 | `calibration.py`、`smoothing.py`、`exercises/squat.py`；创建带时间的重放夹具 | 站立→下降→底部→上升→站立只产生一次完整动作；另存有效次数；丢点、多人、换人、半程不拼接成一次 | 依赖 M1；待实施 |
-| M3 短期记忆与即时反馈 | `working_memory.py`、`runtime.py`、`arbiter.py`；桌面权威计数和暂停状态 | 30 秒姿态环、2 分钟/100 条事件、版本化实时快照；当前组累计不随窗口过期；冷却/去重/过期有效；断云仍可本地计数 | 依赖 M2；待实施 |
-| M4 长期事实账本 | `memory/store.py`、`consolidate.py`、`policy.py`；SQLite WAL、事务 outbox、档案与删除 | 重启查询到同一用户上次训练；重复写不重复计数；数字来自 SQL；满盘不显示已保存；删除同时失效缓存与待执行摘要 | 依赖 M3；待实施 |
+| M0 基线复现 | 修复安装入口、冷启动说明；固定依赖；保留浏览器 AEC 回归 | 新环境按文档启动；缺密钥、无设备、停止可控；离线测试可重复 | 已实现；配置检查与离线 smoke 已通过 |
+| M1 姿态事实入口 | `models.py`、`geometry.py`、`pose_adapter.py`；接入 SessionController 和桌面 | 一次推理同时产出画面、全部人体 17 点、来源、时间、左右膝髋投影角；低置信度/多人/过期不冒充有效值 | 已实现并有测试；真实摄像头精度仍待标注 |
+| M2 主人体与深蹲内核 | `exercises/squat.py`、`runtime.py`；创建带时间的重放夹具 | 站立→下降→底部→上升→站立只产生一次完整动作；另存有效次数；丢点、多人、换人、半程不拼接成一次 | 已实现并接入 UI/SessionController；有 FSM/runtime 和接线测试；真实摄像头精度仍待标注 |
+| M3 短期记忆与即时反馈 | `working_memory.py`、`runtime.py`；版本化实时快照和 watchdog | 30 秒姿态环、2 分钟/100 条事件；当前组累计不随窗口过期；断云仍可本地计数 | 已实现并有边界测试；FeedbackArbiter 待实施 |
+| M4 长期事实账本 | `memory/store.py`、`memory/writer.py`；SQLite WAL、事务 outbox、档案与删除 | 重启查询、重复写幂等、数字 SQL 查询、删除隔离 | 已实现并接入 SessionController；有 store、writer 和接线测试 |
 | M5 受控语音轮次 | `turn_coordinator.py`、`qwen_bridge.py`；复用 `qwen_duplex.py`、BrowserEdge | 最终转写→检索→回答；最多一个活动 response；插话取消旧工具结果和待播音频；计数/暂停输出不被云端阻塞 | 兼容性 spike 提前做，完整接入依赖 M3；待实施 |
-| M6 MCP 与 RAG | `mcp_server.py` / `mcp_client.py`，`memory/retrieval.py`，审核知识集 | 真实 stdio MCP 往返；用户 scope 由应用绑定；数值 SQL、中文关键词/向量混合召回；每个结果有证据 ID、版本、适用条件 | 依赖 M4；待实施 |
-| M7 Agent Loop 闭环 | `agent_loop.py`，决策 schema，反馈前后统计与播放状态 | Observe→Retrieve→Decide→Act→Observe；最多 2 轮决策、每轮最多 2 工具；超时/插话后无过期执行；方案更改由用户确认 | 依赖 M3-M6；待实施 |
+| M6 MCP 与 RAG | `mcp_server.py` / `memory/retrieval.py`，审核知识集 | 受控工具发现/调用、用户 scope 绑定、数值查询、情节/知识检索；每个结果有证据 ID、版本、适用条件 | server、检索服务和离线契约测试已实现；真实 stdio client 往返、中文向量召回和桌面接线待实施 |
+| M7 Agent Loop 闭环 | `agent_loop.py`，决策 schema，反馈前后统计与播放状态 | Observe→Retrieve→Decide→Act→Observe；最多 2 轮决策、每轮最多 2 工具；超时/插话后无过期执行；方案更改由用户确认 | 核心 loop 已实现并有契约测试；尚未接入 SessionController/Qwen 播放 |
 | M8 实际质量与发布 | 真人标注重放、真实设备、30 分钟运行、安装与隐私回归 | 逐次 precision/recall、计数误差、拒判覆盖率、RAG 命中、首音延迟、内存曲线；通过门后再扩展动作 | 贯穿各阶段，最终验收待完成 |
 
 关键顺序：M1 → M2 → M3 → M4 → M6 → M7；M5 的协议可行性验证提前做，避免后期才发现模型会在检索完成前自动回答。M0 的安装整理不应拖到发布当天。
@@ -65,8 +65,33 @@
 - UI 按观察时间每次更新检查 1.5 秒 TTL；无新帧也会清空角度。停止、错误和新会话清空状态；该 TTL 为初始显示策略，不是后续 FSM 的动作连续性阈值。
 - 停止解绑自己的共享 forwarder handler；不抢占其他视频订阅。关闭等待正在运行的原生推理在线程外结束，不假装 asyncio 取消可以杀死 GPU 内核。
 
-## 5. M1 验证与运行
+## 5. 当前验证与运行
 
-实现与测试进行中。测试结果、复现命令和当前限制将在本轮验证后更新。
+当前验证结果：
+
+```text
+51 tests passed
+scripts/check_local_setup.py: 5/5 checks passed
+scripts/smoke_pose.py --device cpu: passed
+scripts/smoke_browser_aec.py --pose --pose-device cpu: passed
+```
+
+复现命令：
+
+```bash
+uv sync --locked
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python scripts/check_local_setup.py
+.venv/bin/python scripts/smoke_pose.py --device cpu
+.venv/bin/python scripts/smoke_browser_aec.py --pose --pose-device cpu
+```
+
+完整桌面启动仍需要真实摄像头、浏览器权限和有效 DashScope API key：
+
+```bash
+./run.sh
+```
+
+当前 UI 已展示本地权威深蹲次数、有效次数、阶段、可见性/暂停状态和记忆 writer 状态。MCP server、检索服务和 Agent Loop 有离线实现与契约测试，但尚未由 `SessionController` 自动拉起；受控 Qwen 文本桥、真实 stdio client 和跨会话问答仍属于 M5-M7 后续接线，不能从离线测试推断为桌面能力已上线。
 
 后续进入 M2 前还需做真人固定机位、侧面/斜侧面和遮挡样本评估。当前角度只供观测，不能据此提供确定性损伤风险判断。

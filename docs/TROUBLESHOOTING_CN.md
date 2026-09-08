@@ -1,277 +1,117 @@
 # 故障排除指南
 
-## ⚠️ 常见错误：TimeoutError - Track Published
+## 当前运行方式
 
-### 错误信息
-```
-TimeoutError: Timeout waiting for pending track: 2 (video) from user...
-Waited 10.0s but WebRTC track_added with matching kind was never received.
-```
+当前桌面入口是 `agent_local.py`，不是旧版 `vision_agent_demo.py`。
 
-### 这是什么？
-这是 Vision-Agents SDK 中的一个已知问题。Agent 尝试发布视频轨道（track）但超时了。
-
-### 重要：这个错误**可以忽略**！
-
-**原因**：
-- Agent 不需要发布自己的视频（它没有摄像头）
-- Agent 只需要**接收**用户的视频
-- 音频轨道已成功发布
-- 这个超时不影响核心功能
-
-### 如何判断 Agent 是否正常工作？
-
-✅ **Agent 正常工作的标志**：
-1. 终端显示：`✓ Agent 已成功加入通话`
-2. 浏览器自动打开 Stream 视频界面
-3. 你能看到自己的摄像头画面
-4. 能听到 AI 的语音问候
-5. 对着摄像头说话或做动作，AI 有反馈
-
-### 解决方案
-
-#### 方案 1：忽略错误，继续使用（推荐）
-
-如果看到以上✅标志，**直接忽略这个错误**，Agent 功能正常！
-
-#### 方案 2：降低 fps 减少压力
-
-编辑 `vision_agent_demo.py`:
-```python
-llm=gemini.Realtime(fps=1),  # 从 3 改为 1
-```
-
-#### 方案 3：使用简化版（不使用 YOLO）
-
-创建一个测试版本，先不使用 YOLO processor：
-
-```python
-# 注释掉 processors
-agent = Agent(
-    edge=getstream.Edge(),
-    agent_user=User(name="AI 健身教练"),
-    instructions="Read @vision_assistant.md",
-    llm=gemini.Realtime(fps=3),
-    # processors=[  # 暂时注释掉
-    #     ultralytics.YOLOPoseProcessor(...)
-    # ],
-)
-```
-
-测试是否能正常对话。如果可以，说明问题在 YOLO processor。
-
----
-
-## 其他常见问题
-
-### 1. Gemini API 错误
-
-**错误**: `429 Too Many Requests` 或 `API key invalid`
-
-**解决方案**:
-```bash
-# 检查 API 密钥
-cat .env | grep GEMINI
-
-# 访问 https://ai.google.dev/ 检查配额
-# 或降低 fps 减少请求次数
-```
-
-### 2. Stream API 连接失败
-
-**错误**: `401 Unauthorized`
-
-**解决方案**:
-```bash
-# 检查 Stream API 密钥
-cat .env | grep STREAM
-
-# 确保密钥来自 https://getstream.io
-# 检查是否有多余空格或引号
-```
-
-### 3. 浏览器没有自动打开
-
-**解决方案**:
-- 查看终端输出中的 URL
-- 手动复制到浏览器
-- 通常格式：`https://getstream.io/video/demos/join/...`
-
-### 4. 摄像头无法访问
-
-**解决方案**:
-1. Chrome: 设置 → 隐私和安全 → 网站设置 → 摄像头
-2. 允许 `getstream.io` 访问
-3. 刷新页面
-4. 关闭其他占用摄像头的程序（Zoom、Teams 等）
-
-### 5. YOLO 模型下载失败
-
-**错误**: `Unable to download yolo11n-pose.pt`
-
-**解决方案**:
-```bash
-# 手动下载
-wget https://github.com/ultralytics/assets/releases/download/v0.0.0/yolo11n-pose.pt
-
-# 或使用国内镜像（如果有）
-```
-
-### 6. 没有语音反馈
-
-**检查清单**:
-- [ ] 浏览器音量是否开启
-- [ ] 允许了麦克风权限
-- [ ] Gemini API 是否正常
-- [ ] 查看终端是否有错误
-
-### 7. AI 看不到我的动作
-
-**可能原因**:
-1. **光线太暗** - 增加光线
-2. **距离太近/太远** - 保持 1.5-2 米
-3. **不在画面中** - 确保全身或上半身在视野内
-4. **YOLO 未运行** - 查看终端是否有 YOLO 相关日志
-
-**测试 YOLO**:
-```python
-# 在终端看到这些信息说明 YOLO 工作正常
-[INFO] YOLOPoseProcessor initialized
-[INFO] Detected 17 keypoints
-```
-
-### 8. Agent 卡住不响应
-
-**解决方案**:
-1. 按 `Ctrl+C` 停止
-2. 等待 5-10 秒清理连接
-3. 重新运行 `./run.sh`
-
-### 9. 内存占用过高
-
-**解决方案**:
-- 降低 fps: `fps=1`
-- 减少 YOLO 模型大小（使用 nano 版本）
-- 关闭其他程序
-
-### 10. CPU 占用 100%
-
-**原因**: YOLO 姿态检测计算密集
-
-**解决方案**:
-```python
-# 使用 GPU（如果有）
-device="cuda"
-
-# 或降低处理频率
-llm=gemini.Realtime(fps=1),
-```
-
----
-
-## 调试技巧
-
-### 查看详细日志
+macOS/Linux：
 
 ```bash
-# 设置为 DEBUG 级别
-export LOG_LEVEL=DEBUG
-uv run python vision_agent_demo.py
+./run.sh
 ```
 
-### 测试各个组件
+Windows：
 
-**测试 1: Stream 连接**
-```bash
-uv run python -c "from vision_agents.plugins import getstream; print('Stream OK')"
+```bat
+scripts\\run.bat
 ```
 
-**测试 2: Gemini API**
-```bash
-uv run python -c "from vision_agents.plugins import gemini; print('Gemini OK')"
-```
-
-**测试 3: YOLO**
-```bash
-uv run python -c "from vision_agents.plugins import ultralytics; print('YOLO OK')"
-```
-
-### 检查网络连接
+启动前可运行配置检查；它不会打印 API key：
 
 ```bash
-# 测试 Stream API
-curl -H "Authorization: Bearer $STREAM_API_KEY" https://stream-io-api.com/api/v2/health
-
-# 测试 Gemini
-curl "https://generativelanguage.googleapis.com/v1/models?key=$GEMINI_API_KEY"
+.venv/bin/python scripts/check_local_setup.py
 ```
 
----
+项目没有 Docker、独立前端或常驻 Web 服务。`./run.sh` 启动的是 Tk 桌面控制器，
+浏览器页面由运行时的 BrowserEdge 临时提供；MCP server 是另一个独立的 stdio 进程。
 
-## 性能优化
-
-### 降低成本和延迟
-
-```python
-# vision_agent_demo.py
-llm=gemini.Realtime(fps=1),  # 最低 fps
-```
-
-### 提升检测精度
-
-```python
-# 使用更大的 YOLO 模型
-ultralytics.YOLOPoseProcessor(
-    model_path="yolo11l-pose.pt",  # large 版本
-    device="cuda"  # GPU 加速
-)
-```
-
-### 平衡配置（推荐）
-
-```python
-llm=gemini.Realtime(fps=3),  # 平衡速度和成本
-ultralytics.YOLOPoseProcessor(
-    model_path="yolo11n-pose.pt",  # nano 版本
-    device="cpu"
-)
-```
-
----
-
-## 何时需要帮助
-
-如果遇到以下情况，可能需要查看 GitHub Issues：
-
-1. Agent 完全无法启动
-2. 浏览器显示白屏或错误页面
-3. Stream API 一直返回 401/403
-4. Gemini API 配额正常但仍无法调用
-
-**官方资源**:
-- Vision-Agents Issues: https://github.com/GetStream/Vision-Agents/issues
-- Stream 文档: https://getstream.io/video/docs/
-- Gemini 文档: https://ai.google.dev/docs
-
----
-
-## 快速诊断清单
-
-运行这个检查脚本：
+离线检查（不调用 Qwen 云端）：
 
 ```bash
-uv run python test_setup.py
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python scripts/smoke_pose.py --device cpu
+.venv/bin/python scripts/smoke_browser_aec.py --pose --pose-device cpu
 ```
 
-应该看到：
-- ✓ Python 版本: 通过
-- ✓ vision-agents: 通过
-- ✓ STREAM_API_KEY: 通过
-- ✓ GEMINI_API_KEY: 通过
-- ✓ vision_assistant.md: 通过
+## 启动前检查
 
-如果全部通过，Agent 应该可以正常运行！
+1. 使用 Python 3.13，项目要求 `>=3.13,<3.14`。
+2. 在仓库根目录执行 `uv sync --locked`。
+3. 复制 `.env.example` 为 `.env`，填写 `DASHSCOPE_API_KEY`。
+4. 确认 `yolo11n-pose.pt` 存在；不存在时首次启动会自动下载。
+5. 使用 Chromium，并允许本机 BrowserEdge 页面访问摄像头和麦克风。
+6. 如需持久化多位训练者，设置 `COACH_USER_ID`；如需更换账本位置，设置
+   `COACH_MEMORY_DB`。默认分别为 `local-user` 和 `coach_memory.sqlite3`。
 
----
+## 常见问题
 
-**记住**: TimeoutError 是已知问题，如果其他功能正常，可以忽略！
+### `DASHSCOPE_API_KEY` 未配置
+
+检查 `.env` 是否存在，以及变量不是占位值。不要在日志、截图或提交中暴露 key。
+
+```bash
+grep '^DASHSCOPE_API_KEY=' .env
+```
+
+### 浏览器没有自动打开
+
+查看终端中的本机 URL，通常形如 `http://127.0.0.1:端口/?token=...`，然后手动复制到 Chromium。该 URL 是一次性会话地址，不要分享给其他人。
+
+### 摄像头或麦克风无法访问
+
+- 在浏览器地址栏允许摄像头和麦克风权限。
+- 关闭 Zoom、Teams 等占用设备的程序。
+- 刷新本机 BrowserEdge 页面并重新授权。
+- 页面必须确认 AEC 已启用，否则服务端会拒绝 SDP offer。
+
+### YOLO 模型下载失败
+
+先单独运行：
+
+```bash
+.venv/bin/python scripts/smoke_pose.py --device cpu
+```
+
+如果网络下载失败，可手动获取 `yolo11n-pose.pt` 后放在仓库根目录，再重试。也可以在 `.env` 设置 `YOLO_DEVICE=cpu` 降低设备兼容性问题。
+
+### 没有语音反馈或 Qwen 返回 401/403/429
+
+确认 DashScope 账户已开通 Qwen Realtime，检查 `DASHSCOPE_BASE_URL` 和 `QWEN_REALTIME_MODEL`。浏览器音量、播放权限和麦克风权限也必须正常。先用离线 smoke 测试确认本地媒体链路，再排查云端权限。
+
+### AI 看不到动作或角度显示为 `--`
+
+- 保持单人、全身在画面内，并改善光线。
+- 侧面/斜侧机位更适合深蹲膝角观测。
+- 第二人进入画面、关键点置信度不足或姿态过期时，系统会暂停角度和计数，这是保护行为。
+- 当前动作事实以本地 YOLO + 深蹲 FSM 为准，不能用 Qwen 的自然语言计数替代。
+
+### 进程卡住或关闭不干净
+
+先按桌面窗口的停止按钮；必要时在终端按 `Ctrl+C`，等待清理后重新运行 `./run.sh`。不要同时启动多个桌面实例占用摄像头。
+
+### CPU 占用过高
+
+在 `.env` 中设置：
+
+```dotenv
+YOLO_DEVICE=cpu
+```
+
+保持 nano 模型和默认有界队列；不要通过提高 Qwen 帧率来修复动作计数，计数由本地 FSM 负责。
+
+## 调试日志
+
+```bash
+LOG_LEVEL=DEBUG .venv/bin/python agent_local.py
+```
+
+仅记录会话状态和错误，不要把 `.env` 内容重定向到日志。
+
+## 项目当前边界
+
+- 已实现并测试：YOLO 结构化姿态快照、单人深蹲 FSM、短期工作记忆、SQLite WAL
+  事实账本、后台写入队列、停止时 drain、浏览器 AEC loopback。
+- `coach.mcp_server`、检索服务和有限步 `coach.agent_loop` 已有离线契约测试，
+  但尚未由桌面会话自动拉起；Qwen 工具调用、跨会话问答和完整 RAG 仍按 roadmap 接入。
+- 因此 `./run.sh` 当前保证的是“实时姿态 + 本地权威计数 + 事实落盘”，不能把独立
+  MCP server 或设计文档误认为完整 Agent Loop 已上线。

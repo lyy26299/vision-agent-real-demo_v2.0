@@ -15,9 +15,9 @@
 
 A **real-time AI fitness coach** that uses computer vision and voice AI to guide your workouts. Built on the official [GetStream/Vision-Agents](https://github.com/GetStream/Vision-Agents) framework, it combines:
 
-- 🎥 **Real-time video analysis** via Stream's ultra-low-latency infrastructure
+- 🎥 **Real-time video analysis** via local BrowserEdge WebRTC
 - 🦴 **Pose detection** with YOLO 11 tracking 17 body keypoints
-- 🧠 **AI coach** powered by Google Gemini with visual understanding
+- 🧠 **AI coach** powered by Qwen Realtime (DashScope)
 - 🗣️ **Voice feedback** for instant form correction and encouragement
 
 ### Watch it in action
@@ -54,10 +54,10 @@ A **real-time AI fitness coach** that uses computer vision and voice AI to guide
 
 ### 🔬 Technical Excellence
 
-- **Ultra-low Latency** - Stream Edge Network (< 30ms)
+- **Low-latency local media** - BrowserEdge WebRTC with browser AEC
 - **Accurate Pose Detection** - YOLO 11 Pose (17 keypoints)
-- **Multimodal AI** - Gemini Realtime (vision + audio)
-- **Production Ready** - Built on official SDK, not a toy demo
+- **Multimodal AI** - Qwen Realtime (vision + audio)
+- **Auditable motion facts** - YOLO Pose plus a local squat FSM and SQLite memory foundation
 
 ---
 
@@ -65,9 +65,10 @@ A **real-time AI fitness coach** that uses computer vision and voice AI to guide
 
 ### Prerequisites
 
-- Python 3.13+
-- Stream API Key ([get free](https://getstream.io))
-- Gemini API Key ([get free](https://ai.google.dev))
+- Python 3.13 (the lockfile targets Python 3.13; Python 3.14 is not supported)
+- A Chromium-based browser with camera/microphone permissions
+- A DashScope API key with Qwen Realtime access ([create one](https://bailian.console.aliyun.com/))
+- macOS/Linux for the Tk desktop entry point (Windows can use `scripts/run.bat`)
 
 ### Installation
 
@@ -76,21 +77,42 @@ A **real-time AI fitness coach** that uses computer vision and voice AI to guide
 git clone https://github.com/MindDock/vision-agent-real-demo.git
 cd vision-agent-real-demo
 
-# 2. Install uv (fast package manager)
+# 2. Install uv (the project dependency manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 3. Install dependencies
-uv sync
+# 3. Install the locked Python 3.13 environment
+uv sync --locked
 
-# 4. Configure API keys
+# 4. Configure the Qwen Realtime key
 cp .env.example .env
-nano .env  # Fill in your API keys
+nano .env  # set DASHSCOPE_API_KEY; other keys are optional/legacy
 
-# 5. Run the agent
+# 5. Run the local coach
 ./run.sh
 ```
 
-**That's it!** Your browser will open automatically, and the AI coach will join the video call.
+`run.sh` first runs `scripts/check_local_setup.py` (it never prints key values), then starts
+`agent_local.py`. The desktop window opens a BrowserEdge page; allow camera and microphone
+access there. The first run downloads `yolo11n-pose.pt` if it is not already present.
+The controller writes authoritative YOLO/FSM motion facts to the SQLite ledger configured by
+`COACH_MEMORY_DB` (default `coach_memory.sqlite3`) under `COACH_USER_ID` (default `local-user`).
+The desktop path currently does not auto-start the optional MCP stdio server or the Agent Loop.
+
+To run without a live camera or cloud call, use the offline checks:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python scripts/smoke_pose.py --device cpu
+.venv/bin/python scripts/smoke_browser_aec.py --pose --pose-device cpu
+```
+
+For the optional MCP diagnostic process:
+
+```bash
+.venv/bin/python -m coach.mcp_server --db coach_memory.sqlite3 --user-id local-user
+```
+
+It waits for an MCP client over stdio; it is not a web server and is not required by the desktop UI.
 
 📖 **Detailed guide**: See [docs/QUICKSTART.md](./docs/QUICKSTART.md)
 
@@ -113,7 +135,7 @@ nano .env  # Fill in your API keys
                                                      │
                                                      ▼
                                           ┌─────────────────────┐
-                                          │ Gemini AI Analysis  │
+                                          │ Qwen Realtime       │
                                           │ (Vision + Voice)    │
                                           └──────────┬──────────┘
                                                      │
@@ -127,9 +149,9 @@ nano .env  # Fill in your API keys
 ### Architecture
 
 1. **Video Capture** - Your webcam streams video via WebRTC
-2. **Edge Processing** - Stream's global network ensures ultra-low latency
+2. **Local transport** - BrowserEdge provides WebRTC and browser AEC
 3. **Pose Detection** - YOLO extracts 17 body keypoints per frame
-4. **AI Analysis** - Gemini processes both video and pose data
+4. **AI Analysis** - Qwen Realtime handles audio/video; local FSM owns rep counts
 5. **Voice Coaching** - Real-time audio feedback guides your form
 
 ---
@@ -207,33 +229,28 @@ AI: "Based on last session, let's focus on lower body:
 
 ### Adjust Performance
 
-**Lower cost/latency**:
-```python
-# vision_agent_demo.py
-llm=gemini.Realtime(fps=1),  # 1 frame per second
-```
+Set these values in `.env` before starting:
 
-**Higher accuracy**:
-```python
-llm=gemini.Realtime(fps=10),  # 10 frames per second
-device="cuda"  # GPU acceleration for YOLO
+```dotenv
+YOLO_DEVICE=mps       # use cpu when MPS is unavailable
+QWEN_REALTIME_MODEL=qwen3.5-omni-plus-realtime
+QWEN_VOICE=Ethan
 ```
 
 ### Customize AI Behavior
 
-Edit `vision_assistant.md` to change:
+Edit `docs/COACHING_INSTRUCTIONS.md` to change:
 - Coaching style (strict/encouraging/technical)
 - Exercise focus (strength/cardio/flexibility)
 - Feedback verbosity (concise/detailed)
 
-### Use OpenAI Instead of Gemini
+The local entry point currently uses Qwen Realtime through DashScope. The old Gemini/Stream
+examples in earlier release notes are retained for historical context and are not required
+by `agent_local.py`.
 
-```python
-# vision_agent_demo.py
-from vision_agents.plugins import openai
-
-llm=openai.Realtime(fps=3),
-```
+For a source checkout, use `./run.sh` after `uv sync --locked`; this starts the Tk desktop
+controller. The package metadata also includes `agent_local.py` and `agent_local_agent.py` so
+building a wheel does not reference the removed `vision_agent_demo.py` entry point.
 
 ---
 
@@ -241,8 +258,9 @@ llm=openai.Realtime(fps=3),
 
 ```
 vision-agent-real-demo/
-├── vision_agent_demo.py      # Main entry point
-├── vision_assistant.md        # AI coaching instructions (18KB knowledge base)
+├── agent_local.py             # Tk desktop entry point
+├── agent_local_agent.py       # Session lifecycle and Qwen/YOLO wiring
+├── docs/COACHING_INSTRUCTIONS.md # AI coaching instructions
 ├── pyproject.toml             # Dependencies
 ├── .env.example               # API key template
 │
@@ -255,10 +273,11 @@ vision-agent-real-demo/
 ├── scripts/
 │   ├── run.sh                 # Start script (macOS/Linux)
 │   ├── run.bat                # Start script (Windows)
-│   └── setup.sh               # Setup script
+│   ├── setup.sh               # Setup script
+│   └── check_local_setup.py   # Qwen/YOLO environment checker
 │
 └── tests/
-    └── test_setup.py          # Environment checker
+    └── ...                     # Offline and browser loopback tests
 ```
 
 ---
@@ -298,8 +317,8 @@ This project is licensed under the MIT License - see the [LICENSE](./LICENSE) fi
 
 - **[GetStream/Vision-Agents](https://github.com/GetStream/Vision-Agents)** - Official framework
 - **[Ultralytics YOLO](https://github.com/ultralytics/ultralytics)** - Pose detection model
-- **[Google Gemini](https://ai.google.dev/)** - Multimodal AI
-- **[Stream](https://getstream.io/)** - Real-time video infrastructure
+- **[Qwen Realtime](https://help.aliyun.com/zh/model-studio/realtime)** - Multimodal AI
+- **BrowserEdge/WebRTC** - Local browser media transport
 
 ---
 
@@ -340,5 +359,5 @@ If you find this project useful, please consider giving it a star! ⭐
 </p>
 
 <p align="center">
-  <sub>Powered by Vision-Agents • YOLO • Gemini • Stream</sub>
+  <sub>Powered by Vision-Agents • YOLO • Qwen Realtime • BrowserEdge</sub>
 </p>

@@ -15,9 +15,9 @@
 
 一个使用计算机视觉和语音 AI 指导你健身的**实时 AI 教练**。基于官方 [GetStream/Vision-Agents](https://github.com/GetStream/Vision-Agents) 框架构建，结合了：
 
-- 🎥 **实时视频分析** - Stream 超低延迟基础设施
+- 🎥 **实时视频分析** - 本机 BrowserEdge WebRTC（浏览器负责摄像头、麦克风和 AEC）
 - 🦴 **姿态检测** - YOLO 11 追踪 17 个身体关键点
-- 🧠 **AI 教练** - Google Gemini 视觉理解
+- 🧠 **AI 教练** - Qwen Realtime（DashScope）
 - 🗣️ **语音反馈** - 即时纠正动作和鼓励
 
 ### 实际演示
@@ -54,10 +54,10 @@
 
 ### 🔬 技术优势
 
-- **超低延迟** - Stream Edge 网络（< 30ms）
+- **低延迟本地链路** - BrowserEdge WebRTC + 有界 YOLO 队列
 - **精确姿态检测** - YOLO 11 Pose（17 个关键点）
-- **多模态 AI** - Gemini Realtime（视觉 + 音频）
-- **生产就绪** - 基于官方 SDK，不是玩具演示
+- **多模态 AI** - Qwen Realtime（视觉 + 音频）
+- **可审计动作事实** - 本地深蹲 FSM、短期工作记忆和 SQLite 长期账本正在逐步接入
 
 ---
 
@@ -65,9 +65,9 @@
 
 ### 前置要求
 
-- Python 3.13+
-- Stream API 密钥（[免费获取](https://getstream.io)）
-- Gemini API 密钥（[免费获取](https://ai.google.dev)）
+- Python 3.13（要求 `>=3.13,<3.14`）
+- Chromium 浏览器，并允许摄像头和麦克风
+- DashScope Qwen Realtime API 密钥（[阿里云百炼](https://bailian.console.aliyun.com/)）
 
 ### 安装
 
@@ -79,20 +79,34 @@ cd vision-agent-real-demo
 # 2. 安装 uv（快速包管理器）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 3. 安装依赖
-uv sync
+# 3. 安装锁定依赖
+uv sync --locked
 
-# 4. 配置 API 密钥
+# 4. 配置 Qwen Realtime API 密钥和本地账本（可选）
 cp .env.example .env
-nano .env  # 填入你的 API 密钥
+nano .env  # 至少填写 DASHSCOPE_API_KEY；COACH_USER_ID/COACH_MEMORY_DB 可按需调整
 
-# 5. 运行 agent
-./scripts/run.sh
+# 5. 启动本地训练台
+./run.sh
 ```
 
-**就这样！** 浏览器会自动打开，AI 教练会加入视频通话。
+脚本会先运行配置检查，然后启动 `agent_local.py`。桌面窗口打开后，点击“开始训练”，
+再在随后打开的 Chromium 页面中授权摄像头和麦克风。默认会将 YOLO/FSM 动作事实写入
+`coach_memory.sqlite3`；可用 `COACH_USER_ID` 和 `COACH_MEMORY_DB` 配置用户隔离与账本路径。
+
+离线验证（不调用云端）：
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python scripts/smoke_pose.py --device cpu
+.venv/bin/python scripts/smoke_browser_aec.py --pose --pose-device cpu
+```
 
 📖 **详细指南**: 查看 [QUICKSTART.md](./QUICKSTART.md)
+
+当前桌面主链路已接入短期工作记忆、后台 SQLite 事实账本和停止时排空；MCP/RAG 与
+有限步 Agent Loop 已有离线契约实现，但尚未由桌面会话自动拉起。详见
+[实施路线](./COACH_IMPLEMENTATION_ROADMAP.md)。
 
 ---
 
@@ -100,7 +114,7 @@ nano .env  # 填入你的 API 密钥
 
 ```
 ┌─────────────┐         ┌──────────────┐         ┌─────────────┐
-│  浏览器     │  WebRTC │ Stream Edge  │ 处理    │ Python      │
+│  浏览器     │  WebRTC │ BrowserEdge  │ 处理    │ Python      │
 │  (摄像头)   │────────▶│  网络        │────────▶│  Agent      │
 │             │         │ (< 30ms)     │         │             │
 └─────────────┘         └──────────────┘         └──────┬──────┘
@@ -113,7 +127,7 @@ nano .env  # 填入你的 API 密钥
                                                      │
                                                      ▼
                                           ┌─────────────────────┐
-                                          │ Gemini AI 分析      │
+                                          │ Qwen Realtime       │
                                           │ (视觉 + 语音)       │
                                           └──────────┬──────────┘
                                                      │
@@ -127,9 +141,9 @@ nano .env  # 填入你的 API 密钥
 ### 架构说明
 
 1. **视频捕获** - 你的摄像头通过 WebRTC 传输视频
-2. **边缘处理** - Stream 全球网络确保超低延迟
+2. **本地传输** - BrowserEdge 在本机提供 WebRTC 和回声消除
 3. **姿态检测** - YOLO 每帧提取 17 个身体关键点
-4. **AI 分析** - Gemini 同时处理视频和姿态数据
+4. **AI 分析** - Qwen Realtime 处理视频和音频；动作计数以本地 FSM 为准
 5. **语音指导** - 实时音频反馈引导你的动作
 
 ---
@@ -207,16 +221,11 @@ AI："根据上次训练，我们重点练下肢：
 
 ### 调整性能
 
-**降低成本/延迟**:
+**调整性能**（在 `.env` 中设置）:
 ```python
-# vision_agent_demo.py
-llm=gemini.Realtime(fps=1),  # 每秒 1 帧
-```
-
-**提高精度**:
-```python
-llm=gemini.Realtime(fps=10),  # 每秒 10 帧
-device="cuda"  # YOLO GPU 加速
+YOLO_DEVICE=mps  # 没有 MPS 时使用 cpu
+QWEN_REALTIME_MODEL=qwen3.5-omni-plus-realtime
+QWEN_VOICE=Ethan
 ```
 
 ### 自定义 AI 行为
@@ -226,14 +235,7 @@ device="cuda"  # YOLO GPU 加速
 - 运动重点（力量/有氧/灵活性）
 - 反馈详细程度（简洁/详细）
 
-### 使用 OpenAI 代替 Gemini
-
-```python
-# vision_agent_demo.py
-from vision_agents.plugins import openai
-
-llm=openai.Realtime(fps=3),
-```
+旧版 Stream/Gemini 示例仅作历史参考，不是当前 `agent_local.py` 的运行依赖。
 
 ---
 
@@ -241,7 +243,8 @@ llm=openai.Realtime(fps=3),
 
 ```
 vision-agent-real-demo/
-├── vision_agent_demo.py           # 主入口
+├── agent_local.py                 # Tk 桌面主入口
+├── agent_local_agent.py           # 会话生命周期和 Qwen/YOLO 接线
 ├── pyproject.toml                 # 依赖配置
 ├── .env.example                   # API 密钥模板
 │
@@ -249,7 +252,8 @@ vision-agent-real-demo/
 │   ├── README_CN.md               # 中文文档
 │   ├── QUICKSTART.md              # 快速开始
 │   ├── TROUBLESHOOTING_CN.md      # 故障排除
-│   ├── COACHING_INSTRUCTIONS.md   # AI 教练指令（18KB 知识库）
+│   ├── COACHING_INSTRUCTIONS.md   # AI 教练指令
+│   ├── COACH_AGENT_MEMORY_MCP_RAG_DESIGN.md # 记忆/MCP/RAG 设计
 │   └── images/                    # 截图和演示
 │
 ├── scripts/
@@ -257,8 +261,7 @@ vision-agent-real-demo/
 │   ├── run.bat                    # 启动脚本（Windows）
 │   └── setup.sh                   # 设置脚本
 │
-└── tests/
-    └── test_setup.py              # 环境检查器
+└── tests/                         # 离线、姿态、动作和账本测试
 ```
 
 ---
@@ -298,8 +301,8 @@ vision-agent-real-demo/
 
 - **[GetStream/Vision-Agents](https://github.com/GetStream/Vision-Agents)** - 官方框架
 - **[Ultralytics YOLO](https://github.com/ultralytics/ultralytics)** - 姿态检测模型
-- **[Google Gemini](https://ai.google.dev/)** - 多模态 AI
-- **[Stream](https://getstream.io/)** - 实时视频基础设施
+- **[Qwen Realtime](https://help.aliyun.com/zh/model-studio/realtime)** - 多模态 AI
+- **BrowserEdge/WebRTC** - 本地浏览器媒体传输
 
 ---
 
@@ -331,5 +334,5 @@ vision-agent-real-demo/
 </p>
 
 <p align="center">
-  <sub>基于 Vision-Agents • YOLO • Gemini • Stream</sub>
+  <sub>基于 Vision-Agents • YOLO • Qwen Realtime • BrowserEdge</sub>
 </p>

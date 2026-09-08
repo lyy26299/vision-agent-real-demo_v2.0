@@ -13,6 +13,8 @@ dependencies = [
     "aiohttp==3.14.3",
     "aiortc==1.14.0",
     "av==16.1.0",
+    # Memory MCP tools target the installed v1 SDK contract explicitly.
+    "mcp==1.29.1",
 ]
 
 [project.optional-dependencies]
@@ -27,16 +29,16 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["vision_agent_demo"]
+# The runnable desktop entry point is ``agent_local.py``.  Keep the two
+# top-level modules in wheels as well as the ``coach`` package so an installed
+# copy has the same imports as a checkout.
+py-modules = ["agent_local", "agent_local_agent"]
 
 [tool.setuptools.packages.find]
 include = ["coach*"]
 
 [tool.setuptools.package-data]
 coach = ["browser_media.html"]
-
-[tool.vision-agents.agent]
-entrypoint = "vision_agent_demo:runner"
 
 [tool.black]
 line-length = 100

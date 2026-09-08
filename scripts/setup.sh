@@ -1,100 +1,41 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
 
 echo "=========================================="
-echo "  Vision Agent 实时交互感知演示 - 安装"
+echo "  Vision Coach 本地训练台 - 安装"
 echo "=========================================="
-echo ""
 
-# 检查 Python 版本
-echo "检查 Python 版本..."
-python_version=$(python3 --version 2>&1 | awk '{print $2}')
-required_version="3.13"
-
-echo "当前 Python 版本: $python_version"
-echo "要求版本: >= $required_version"
-echo ""
-
-# 检查是否安装了 uv
-if command -v uv &> /dev/null; then
-    echo "✓ 检测到 uv 包管理器"
-    use_uv=true
-else
-    echo "⚠ 未检测到 uv，推荐安装以获得更快的依赖安装速度"
-    echo ""
-    read -p "是否现在安装 uv? (y/n): " install_uv
-    if [ "$install_uv" = "y" ]; then
-        echo "安装 uv..."
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-        export PATH="$HOME/.cargo/bin:$PATH"
-        use_uv=true
-    else
-        use_uv=false
-    fi
+if ! command -v uv >/dev/null 2>&1; then
+    echo "错误: 未找到 uv。请先安装: https://docs.astral.sh/uv/getting-started/installation/" >&2
+    exit 1
 fi
 
-echo ""
-echo "----------------------------------------"
-echo "安装依赖包..."
-echo "----------------------------------------"
+echo "安装 Python 3.13 依赖..."
+uv sync --locked
 
-if [ "$use_uv" = true ]; then
-    echo "使用 uv sync 安装依赖..."
-    uv sync
-else
-    echo "使用 pip 安装依赖..."
-    pip3 install -e .
-fi
-
-echo ""
-echo "----------------------------------------"
-echo "配置环境变量..."
-echo "----------------------------------------"
-
-if [ ! -f .env ]; then
-    echo "创建 .env 文件..."
+if [[ ! -f .env ]]; then
     cp .env.example .env
-    echo ""
-    echo "⚠ 重要: 请编辑 .env 文件并填入你的 API 密钥"
-    echo ""
-    echo "需要的 API 密钥:"
-    echo "1. Stream API (必需) - https://getstream.io"
-    echo "2. Gemini API (推荐) - https://ai.google.dev/"
-    echo "   或 OpenAI API - https://platform.openai.com/"
-    echo ""
-    read -p "按回车键打开 .env 文件进行编辑..."
-
-    if command -v nano &> /dev/null; then
-        nano .env
-    elif command -v vim &> /dev/null; then
-        vim .env
-    else
-        echo "请手动编辑 .env 文件: nano .env 或 vim .env"
-    fi
+    echo "已创建 .env；请编辑该文件并填写 DASHSCOPE_API_KEY。"
 else
     echo "✓ .env 文件已存在"
 fi
 
-echo ""
-echo "----------------------------------------"
-echo "下载 YOLO 模型（如果需要）..."
-echo "----------------------------------------"
-
-if [ ! -f yolo11n-pose.pt ]; then
-    echo "下载 YOLO 11 Pose 模型..."
-    echo "注意: 首次运行时 Ultralytics 会自动下载"
+if [[ -f yolo11n-pose.pt ]]; then
+    echo "✓ yolo11n-pose.pt 已存在"
 else
-    echo "✓ YOLO 模型已存在"
+    echo "提示: 首次启动会由 Ultralytics 自动下载 yolo11n-pose.pt（约 6 MB）。"
 fi
 
 echo ""
-echo "=========================================="
-echo "  安装完成！"
-echo "=========================================="
+echo "检查本地配置（不会打印密钥）..."
+if ! "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/check_local_setup.py"; then
+    echo "请完成 .env 配置后再次运行该检查。"
+fi
+
 echo ""
-echo "下一步:"
-echo "1. 确保 .env 文件中的 API 密钥已正确配置"
-echo "2. 运行程序: ./run.sh 或 python3 vision_agent_demo.py"
-echo ""
-echo "快速测试 API 配置:"
-echo "  python3 -c 'from dotenv import load_dotenv; import os; load_dotenv(); print(\"Stream Key:\", \"✓\" if os.getenv(\"STREAM_API_KEY\") else \"✗\"); print(\"Gemini Key:\", \"✓\" if os.getenv(\"GEMINI_API_KEY\") else \"✗\")'"
-echo ""
+echo "安装完成。启动命令:"
+echo "  ./run.sh"
+echo "  .venv/bin/python agent_local.py"

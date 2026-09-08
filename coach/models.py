@@ -27,6 +27,61 @@ PoseStatus = Literal[
     "observable", "partial", "unobservable", "no_person", "multiple_people", "inference_error"
 ]
 
+MotionPhase = Literal["unknown", "standing", "descending", "bottom", "ascending", "paused"]
+MotionEventKind = Literal[
+    "phase_changed", "rep_completed", "visibility_lost", "multiple_people", "reset"
+]
+
+
+@dataclass(frozen=True, slots=True)
+class MotionSnapshot:
+    """Derived motion state. It is authoritative only when produced by MotionRuntime."""
+
+    session_id: str
+    frame_id: int
+    observed_at: float
+    phase: MotionPhase
+    completed_reps: int
+    valid_reps: int
+    visible: bool
+    paused: bool
+    knee_angle_deg: float | None
+    hip_angle_deg: float | None
+    rule_version: str
+    evidence_start_frame: int | None = None
+    evidence_end_frame: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CoachEvent:
+    event_id: str
+    session_id: str
+    kind: MotionEventKind
+    occurred_at: float
+    frame_id: int
+    rule_version: str
+    evidence_start_frame: int | None
+    evidence_end_frame: int | None
+    facts: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RepRecord:
+    rep_id: str
+    session_id: str
+    rep_index: int
+    valid: bool
+    started_at: float
+    completed_at: float
+    duration_ms: float
+    min_knee_angle_deg: float | None
+    max_knee_angle_deg: float | None
+    usable_sample_ratio: float
+    reason_codes: tuple[str, ...]
+    rule_version: str
+    evidence_start_frame: int | None
+    evidence_end_frame: int | None
+
 
 @dataclass(frozen=True, slots=True)
 class Keypoint:

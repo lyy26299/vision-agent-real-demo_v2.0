@@ -3,8 +3,9 @@
 测试 Vision Agent 环境配置
 运行此脚本检查所有依赖和 API 密钥是否正确配置
 """
-import sys
 import os
+import sys
+from importlib.util import find_spec
 from pathlib import Path
 
 
@@ -28,13 +29,11 @@ def check_python_version():
     required = (3, 13)
 
     current = f"{version.major}.{version.minor}.{version.micro}"
-    required_str = f"{required[0]}.{required[1]}+"
-
-    is_ok = version >= required
+    is_ok = required <= version < (3, 14)
     print_check(
         "Python 版本",
         is_ok,
-        f"当前: {current}, 要求: {required_str}"
+        f"当前: {current}, 要求: >=3.13,<3.14"
     )
     return is_ok
 
@@ -55,7 +54,9 @@ def check_dependencies():
 
     # 检查 dotenv
     try:
-        import dotenv
+        available = find_spec("dotenv") is not None
+        if not available:
+            raise ImportError
         print_check("python-dotenv", True)
         checks.append(True)
     except ImportError:
@@ -90,47 +91,15 @@ def check_env_file():
 
     checks = []
 
-    # 检查 Stream API
-    stream_key = os.getenv("STREAM_API_KEY")
-    stream_secret = os.getenv("STREAM_API_SECRET")
-
-    if stream_key and stream_key != "your_stream_api_key_here":
-        print_check("STREAM_API_KEY", True, f"已配置 ({stream_key[:10]}...)")
-        checks.append(True)
-    else:
-        print_check("STREAM_API_KEY", False, "未配置或使用默认值")
-        checks.append(False)
-
-    if stream_secret and stream_secret != "your_stream_secret_here":
-        print_check("STREAM_API_SECRET", True, f"已配置 ({stream_secret[:10]}...)")
-        checks.append(True)
-    else:
-        print_check("STREAM_API_SECRET", False, "未配置或使用默认值")
-        checks.append(False)
-
-    # 检查 AI API（至少需要一个）
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
-
-    has_ai_key = False
-
-    if gemini_key and gemini_key != "your_gemini_api_key_here":
-        print_check("GEMINI_API_KEY", True, f"已配置 ({gemini_key[:10]}...)")
-        has_ai_key = True
-    else:
-        print_check("GEMINI_API_KEY", False, "未配置")
-
-    if openai_key and openai_key != "your_openai_api_key_here":
-        print_check("OPENAI_API_KEY", True, f"已配置 ({openai_key[:10]}...)")
-        has_ai_key = True
-    else:
-        print_check("OPENAI_API_KEY", False, "未配置")
-
-    if not has_ai_key:
-        print("\n⚠ 警告: 至少需要配置 GEMINI_API_KEY 或 OPENAI_API_KEY")
-        checks.append(False)
-    else:
-        checks.append(True)
+    # The local desktop entry point uses Qwen Realtime through DashScope.
+    dashscope_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+    configured = bool(dashscope_key and dashscope_key != "your_dashscope_api_key_here")
+    print_check(
+        "DASHSCOPE_API_KEY",
+        configured,
+        "已配置（值未显示）" if configured else "未配置或使用默认值",
+    )
+    checks.append(configured)
 
     return all(checks)
 
@@ -152,14 +121,14 @@ def check_yolo_model():
 def check_instructions():
     print_header("检查指令文件")
 
-    instructions_path = Path("vision_assistant.md")
+    instructions_path = Path("docs/COACHING_INSTRUCTIONS.md")
 
     if instructions_path.exists():
         size_kb = instructions_path.stat().st_size / 1024
-        print_check("vision_assistant.md", True, f"存在 ({size_kb:.1f} KB)")
+        print_check("docs/COACHING_INSTRUCTIONS.md", True, f"存在 ({size_kb:.1f} KB)")
         return True
     else:
-        print_check("vision_assistant.md", False, "指令文件缺失")
+        print_check("docs/COACHING_INSTRUCTIONS.md", False, "指令文件缺失")
         return False
 
 
@@ -175,28 +144,26 @@ def print_summary(results):
     print(f"✗ 失败: {failed}")
 
     if all(results.values()):
-        print("\n🎉 所有检查通过！你可以运行 ./run.sh 启动 Agent")
+        print("\n🎉 所有检查通过！你可以运行 ./run.sh 启动本地教练")
         print("\n快速启动:")
         print("  ./run.sh              # macOS/Linux")
         print("  run.bat               # Windows")
-        print("  python vision_agent_demo.py")
+        print("  .venv/bin/python agent_local.py")
         return 0
     else:
         print("\n⚠ 部分检查失败，请根据上述提示修复问题")
         print("\n常见解决方案:")
 
         if not results.get("python"):
-            print("- Python 版本: 升级到 3.13+")
+            print("- Python 版本: 使用 Python 3.13（不支持 3.14+）")
         if not results.get("deps"):
-            print("- 依赖包: 运行 ./setup.sh 或 pip install -e .")
+            print("- 依赖包: 运行 uv sync --locked")
         if not results.get("env"):
-            print("- 环境变量: 编辑 .env 文件并填入正确的 API 密钥")
+            print("- 环境变量: 编辑 .env 文件并填入 DASHSCOPE_API_KEY")
         if not results.get("instructions"):
-            print("- 指令文件: 确保 vision_assistant.md 存在")
+            print("- 指令文件: 确保 docs/COACHING_INSTRUCTIONS.md 存在")
 
-        print("\n获取 API 密钥:")
-        print("- Stream API: https://getstream.io")
-        print("- Gemini API: https://ai.google.dev/")
+        print("\n获取 API 密钥: https://bailian.console.aliyun.com/")
 
         return 1
 

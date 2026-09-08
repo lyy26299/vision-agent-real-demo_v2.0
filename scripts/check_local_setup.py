@@ -28,10 +28,13 @@ def print_check(name: str, status: bool, detail: str = "") -> None:
 
 def check_python_version() -> bool:
     print_header("检查 Python 版本")
+    # pyproject.toml pins this dependency set to Python 3.13; 3.14 is not
+    # interchangeable because native media wheels are resolved per minor.
     required = (3, 13)
+    maximum = (3, 14)
     current = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    is_ok = sys.version_info >= required
-    print_check("Python 版本", is_ok, f"当前: {current}, 要求: 3.13+")
+    is_ok = required <= sys.version_info < maximum
+    print_check("Python 版本", is_ok, f"当前: {current}, 要求: >=3.13,<3.14")
     return is_ok
 
 
@@ -117,7 +120,7 @@ def print_summary(results: dict[str, bool]) -> int:
 
     print("\n部分检查失败，请根据上述提示修复：")
     if not results.get("python"):
-        print("- Python 版本：升级到 3.13+")
+        print("- Python 版本：使用 Python 3.13（不支持 3.14+）")
     if not results.get("deps"):
         print("- 依赖包：运行 uv sync --locked")
     if not results.get("env"):

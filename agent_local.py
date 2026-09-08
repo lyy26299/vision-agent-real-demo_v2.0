@@ -16,7 +16,7 @@ from tkinter import ttk
 from typing import Any
 
 from agent_local_agent import LOGGER, SessionController
-from coach.models import PoseSnapshot
+from coach.models import MotionSnapshot, PoseSnapshot
 
 
 @dataclass(frozen=True)
@@ -61,8 +61,11 @@ class FitnessCoachUI:
         self.logs: queue.Queue[str] = queue.Queue(maxsize=400)
         self.frames: queue.Queue[Any] = queue.Queue(maxsize=2)
         self.poses: queue.Queue[PoseSnapshot] = queue.Queue(maxsize=1)
+        self.motions: queue.Queue[MotionSnapshot] = queue.Queue(maxsize=1)
+        self.memory_statuses: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=4)
         self._pose_session_id: str | None = None
         self._latest_pose: PoseSnapshot | None = None
+        self._latest_motion: MotionSnapshot | None = None
         self._pose_order = (0, 0)
         self._photo: tk.PhotoImage | None = None
         self._exercise = self.EXERCISES[0]
@@ -232,7 +235,7 @@ class FitnessCoachUI:
             font=(self.font_family, 12, "bold"),
         ).pack(side="right", padx=16)
 
-        metrics = tk.Frame(left, bg=self.PANEL, height=100)
+        metrics = tk.Frame(left, bg=self.PANEL, height=132)
         metrics.grid(row=2, column=0, sticky="ew")
         metrics.grid_propagate(False)
         metrics.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="pose-metric")
@@ -266,6 +269,24 @@ class FitnessCoachUI:
             justify="left",
         )
         self.pose_status_label.grid(row=2, column=0, columnspan=4, sticky="ew", padx=16)
+        self.motion_status_label = tk.Label(
+            metrics,
+            text="动作：-- · 完成 0 · 有效 0 · 阶段 --",
+            bg=self.PANEL,
+            fg=self.TEXT,
+            font=(self.font_family, 12, "bold"),
+            anchor="w",
+        )
+        self.motion_status_label.grid(row=3, column=0, columnspan=4, sticky="ew", padx=16, pady=(7, 0))
+        self.memory_status_label = tk.Label(
+            metrics,
+            text="记忆：未连接",
+            bg=self.PANEL,
+            fg=self.MUTED,
+            font=(self.font_family, 11),
+            anchor="w",
+        )
+        self.memory_status_label.grid(row=4, column=0, columnspan=4, sticky="ew", padx=16, pady=(3, 0))
         metrics.bind(
             "<Configure>",
             lambda event: self.pose_status_label.configure(wraplength=max(100, event.width - 32)),
@@ -563,6 +584,27 @@ class FitnessCoachUI:
                 self.poses.get_nowait()
         self._draw_pose()
 
+    def submit_motion(self, motion: MotionSnapshot) -> None:
+        """Queue authoritative local motion state for the Tk thread."""
+        motions = getattr(self, "motions", None)
+        if motions is None:
+            return
+        while motions.full():
+            with contextlib.suppress(queue.Empty):
+                motions.get_nowait()
+        with contextlib.suppress(queue.Full):
+            motions.put_nowait(motion)
+
+    def submit_memory_status(self, status: str, detail: str = "") -> None:
+        statuses = getattr(self, "memory_statuses", None)
+        if statuses is None:
+            return
+        while statuses.full():
+            with contextlib.suppress(queue.Empty):
+                statuses.get_nowait()
+        with contextlib.suppress(queue.Full):
+            statuses.put_nowait((str(status), str(detail)))
+
     def begin_pose_session(self, session_id: str) -> None:
         self._pose_session_id = session_id
         self._reset_pose()
@@ -619,6 +661,57 @@ class FitnessCoachUI:
                 text += f" · {len(snapshot.detections)} 人 · {snapshot.processing_ms:.0f} ms"
         self.pose_status_label.configure(text=text)
 
+    def _draw_motion(self) -> None:
+        motions = getattr(self, "motions", None)
+        if motions is not None:
+            while True:
+                try:
+                    self._latest_motion = motions.get_nowait()
+                except queue.Empty:
+                    break
+        motion = getattr(self, "_latest_motion", None)
+        label = getattr(self, "motion_status_label", None)
+        if motion is not None and label is not None:
+            phase_names = {
+                "unknown": "未就绪",
+                "standing": "站立",
+                "descending": "下蹲",
+                "bottom": "底部",
+                "ascending": "起身",
+                "paused": "已暂停",
+            }
+            phase = phase_names.get(motion.phase, motion.phase)
+            visibility = "可见" if motion.visible else "不可见"
+            paused = " · 暂停" if motion.paused else ""
+            label.configure(
+                text=(
+                    f"动作：深蹲 · 完成 {motion.completed_reps} · "
+                    f"有效 {motion.valid_reps} · 阶段 {phase} · {visibility}{paused}"
+                )
+            )
+
+        statuses = getattr(self, "memory_statuses", None)
+        memory_label = getattr(self, "memory_status_label", None)
+        if statuses is not None and memory_label is not None:
+            latest_status: tuple[str, str] | None = None
+            while True:
+                try:
+                    latest_status = statuses.get_nowait()
+                except queue.Empty:
+                    break
+            if latest_status is not None:
+                status, detail = latest_status
+                names = {
+                    "starting": "连接中",
+                    "ready": "已连接",
+                    "queued": "排队写入",
+                    "writing": "正在写入",
+                    "saved": "已保存",
+                    "failed": "写入失败",
+                    "closed": "已关闭",
+                }
+                memory_label.configure(text=f"记忆：{names.get(status, status)}" + (f" · {detail}" if detail else ""))
+
     def append_log(self, text: str, tag: str = "normal") -> None:
         self.log_text.configure(state="normal")
         self.log_text.insert("end", text.rstrip() + "\n", tag)
@@ -632,6 +725,7 @@ class FitnessCoachUI:
         self._drain_logs()
         self._draw_latest_frame()
         self._draw_pose()
+        self._draw_motion()
         self._update_elapsed()
 
     def _drain_logs(self) -> None:
